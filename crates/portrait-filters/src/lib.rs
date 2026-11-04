@@ -19,11 +19,13 @@ mod task;
 #[cfg(all(feature = "onnx", not(target_arch = "wasm32")))]
 mod onnx_run;
 
-pub use image::RgbImage;
+pub use image::{RgbImage, layer_pixels};
 pub use manifest::{Layout, TensorContract, Tile};
 pub use paths::{Platform, default_directory, default_directory_for, resolve_directory};
 pub use scan::{Catalog, Package, Skip, scan};
-pub use task::{DODGE_BURN_OPACITY, LayerPlacement, MenuEntry, MenuWhich, classic_id, disable_reason, menu_command_id, menu_entries, normalize_id, placement};
+pub use task::{
+    DODGE_BURN_OPACITY, LayerPlacement, MenuEntry, MenuWhich, ResultKind, classic_id, disable_reason, menu_command_id, menu_entries, normalize_id, placement,
+};
 
 /// Whether this build can execute `model.onnx`. False for wasm and for native builds that were
 /// not compiled with `--features onnx` (engine feature `portrait-onnx`).

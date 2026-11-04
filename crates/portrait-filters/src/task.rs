@@ -1,7 +1,8 @@
 //! Package ids, default blends, and why a menu row is disabled.
 //!
-//! Ids are strings from the manifest. The classic three are only default blends and a stable
-//! apply order, not a closed set the host has to recompile to extend.
+//! Ids are strings from the manifest. The classic three are only default blends, Skin Tone's
+//! difference-map default, and a stable apply order, not a closed set the host has to recompile
+//! to extend.
 
 use photocraft_color::BlendMode;
 
@@ -25,6 +26,36 @@ pub struct LayerPlacement {
     pub name: String,
 }
 
+/// What the new layer stores after the model returns.
+///
+/// `Absolute` is the model RGB. `Difference` is the mid-gray residual
+/// `clamp(0.5 + 0.5 * (filtered - source), 0, 1)`. Linear Light over `source` reconstructs
+/// `filtered` when both images are in 0–1. See `docs/PORTRAIT_FILTERS.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultKind {
+    Absolute,
+    Difference,
+}
+
+impl ResultKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Absolute => "absolute",
+            Self::Difference => "difference",
+        }
+    }
+
+    /// `absolute` / `full`, or `difference` / `diff` / `residual`. Anything else is an error.
+    pub fn parse(name: &str) -> Result<Self, crate::Error> {
+        let key: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).flat_map(|c| c.to_lowercase()).collect();
+        match key.as_str() {
+            "absolute" | "full" => Ok(Self::Absolute),
+            "difference" | "diff" | "residual" => Ok(Self::Difference),
+            _ => Err(crate::Error::Package(format!("unknown result `{name}` (expected absolute or difference)"))),
+        }
+    }
+}
+
 /// One row the Filter menu builds from a scan. `menu_id` is what the UI dispatches.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuEntry {
@@ -39,6 +70,7 @@ pub struct PackageDefaults {
     pub priority: i32,
     pub solo: LayerPlacement,
     pub stacked: LayerPlacement,
+    pub result: ResultKind,
 }
 
 /// `heal`, `dodge_burn` / `dodge-burn`, `skin_tone` / `skin-tone`. Anything else is `None`.
@@ -81,14 +113,15 @@ pub fn defaults_for(id: &str) -> PackageDefaults {
     let (label, priority, blend, opacity, stacked_blend) = match id {
         "heal" => ("Heal", 10, BlendMode::Normal, 1.0, BlendMode::Normal),
         "dodge_burn" => ("Dodge & Burn", 20, BlendMode::SoftLight, DODGE_BURN_OPACITY, BlendMode::SoftLight),
-        // Color only when All places more than one layer.
-        "skin_tone" => ("Skin Tone", 30, BlendMode::Normal, 1.0, BlendMode::Color),
+        // Difference map. Linear Light over the source reconstructs the model RGB, alone and in All.
+        "skin_tone" => ("Skin Tone", 30, BlendMode::LinearLight, 1.0, BlendMode::LinearLight),
         _ => ("", 100, BlendMode::Normal, 1.0, BlendMode::Normal),
     };
+    let result = if id == "skin_tone" { ResultKind::Difference } else { ResultKind::Absolute };
     let label = if label.is_empty() { id.to_string() } else { label.to_string() };
     let solo = LayerPlacement { blend, opacity, name: label.clone() };
     let stacked = LayerPlacement { blend: stacked_blend, opacity, name: label.clone() };
-    PackageDefaults { label, priority, solo, stacked }
+    PackageDefaults { label, priority, solo, stacked, result }
 }
 
 /// Resolved placement. `stacked` is true when All is placing more than one layer.

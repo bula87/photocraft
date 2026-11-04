@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Error;
 use crate::manifest::{self, ParsedManifest, TensorContract, Tile};
-use crate::task::LayerPlacement;
+use crate::task::{LayerPlacement, ResultKind};
 
 /// One installed package. `solo` is a single menu run; `stacked` is used when All places more than one layer.
 #[derive(Clone, Debug)]
@@ -19,6 +19,8 @@ pub struct Package {
     pub model: PathBuf,
     pub solo: LayerPlacement,
     pub stacked: LayerPlacement,
+    /// `Absolute` stores the model RGB. `Difference` stores the mid-gray residual.
+    pub result: ResultKind,
     pub tensor: TensorContract,
     pub tile: Option<Tile>,
 }
@@ -105,7 +107,7 @@ fn load_folder(folder: &Path, name: &str) -> Result<Package, Error> {
     let manifest_path = folder.join("manifest.json");
     let bytes = fs::read(&manifest_path).map_err(|_| Error::Package("missing manifest.json".into()))?;
     let parsed = manifest::parse_manifest(&bytes, name)?;
-    let ParsedManifest { id, label, description, version, priority, model_file, solo, stacked, tensor, tile } = parsed;
+    let ParsedManifest { id, label, description, version, priority, model_file, solo, stacked, result, tensor, tile } = parsed;
     if !manifest::model_file_ok(&model_file) {
         return Err(Error::Package(format!("model file `{model_file}` must be a file name inside the package")));
     }
@@ -114,5 +116,5 @@ fn load_folder(folder: &Path, name: &str) -> Result<Package, Error> {
     if !meta.is_file() || meta.len() == 0 {
         return Err(Error::Package(format!("{model_file} is empty")));
     }
-    Ok(Package { id, label, description, version, priority, folder: folder.to_path_buf(), model, solo, stacked, tensor, tile })
+    Ok(Package { id, label, description, version, priority, folder: folder.to_path_buf(), model, solo, stacked, result, tensor, tile })
 }
