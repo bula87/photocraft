@@ -5,7 +5,9 @@
 
 use photocraft_color::ColorMode;
 use photocraft_doc::{Document, Layer, LayerId};
-use photocraft_portrait_filters::{Catalog, LayerPlacement, MenuWhich, RgbImage, disable_reason, infer, placement, resolve_directory, runtime_available, scan};
+use photocraft_portrait_filters::{
+    Catalog, LayerPlacement, MenuWhich, RgbImage, disable_reason, infer, layer_pixels, placement, resolve_directory, runtime_available, scan,
+};
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
@@ -133,6 +135,7 @@ fn list_json(catalog: &Catalog) -> Value {
             "model": package.model.display().to_string(),
             "blend": package.solo.blend.label(),
             "opacity": package.solo.opacity,
+            "result": package.result.label(),
             "stackedBlend": package.stacked.blend.label(),
             "stackedOpacity": package.stacked.opacity,
             "tile": package.tile.map(|tile| json!({"size": tile.size, "overlap": tile.overlap})),
@@ -170,7 +173,7 @@ fn run_all(s: &mut Session) -> Result<Value> {
 }
 
 fn run_ids(s: &mut Session, ids: &[String], label: &str) -> Result<Value> {
-    require_rgb(s).map_err(|msg| EngineError::Other(msg))?;
+    require_rgb(s).map_err(EngineError::Other)?;
     let catalog = catalog_of(s);
     let stacked = ids.len() > 1;
     let (image, alpha) = read_active(s)?;
@@ -180,8 +183,10 @@ fn run_ids(s: &mut Session, ids: &[String], label: &str) -> Result<Value> {
             return Err(EngineError::Other(reason));
         }
         let package = catalog.get(id).ok_or_else(|| EngineError::Other(format!("portrait filter package `{id}` is not installed")))?;
-        let image = infer(package, &image).map_err(|e| EngineError::Other(e.to_string()))?;
-        planned.push((placement(&package.solo, &package.stacked, stacked), image));
+        let filtered = infer(package, &image).map_err(|e| EngineError::Other(e.to_string()))?;
+        // Difference packages store a mid-gray residual. Linear Light over `image` reconstructs the model RGB.
+        let pixels = layer_pixels(package.result, &image, filtered).map_err(|e| EngineError::Other(e.to_string()))?;
+        planned.push((placement(&package.solo, &package.stacked, stacked), pixels));
     }
     let layer_ids = s.edit(label, |doc, active| install(doc, active, &alpha, &planned))?;
     if let Some(top) = layer_ids.last().copied() {
@@ -292,7 +297,7 @@ fn select_only(s: &mut Session, id: LayerId) {
 #[cfg(test)]
 mod tests {
     use photocraft_color::BlendMode;
-    use photocraft_portrait_filters::{MenuWhich, RgbImage, disable_reason, menu_command_id, runtime_available, scan};
+    use photocraft_portrait_filters::{MenuWhich, ResultKind, RgbImage, disable_reason, layer_pixels, menu_command_id, runtime_available, scan};
     use serde_json::json;
 
     use super::catalog_of;
@@ -361,6 +366,8 @@ mod tests {
         let ids: Vec<&str> = listed["packages"].as_array().unwrap().iter().filter_map(|p| p["id"].as_str()).collect();
         assert_eq!(ids, ["heal", "glow"]);
         assert_eq!(listed["packages"][1]["menuId"], json!(menu_command_id("glow")));
+        assert_eq!(listed["packages"][0]["result"], json!("absolute"));
+        assert_eq!(listed["packages"][1]["result"], json!("absolute"));
         let err = session.execute("filter.portraitRetouch.apply", json!({"id": "glow"})).unwrap_err().to_string();
         assert!(err.contains("ONNX Runtime"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
@@ -396,7 +403,7 @@ mod tests {
                     },
                     dodge,
                 ),
-                (super::LayerPlacement { blend: BlendMode::Color, opacity: 1.0, name: "Skin Tone".into() }, skin),
+                (super::LayerPlacement { blend: BlendMode::LinearLight, opacity: 1.0, name: "Skin Tone".into() }, skin),
             ];
             let alpha = vec![1.0; 4];
             session.edit("Portrait retouch", |doc, active| super::install(doc, active, &alpha, &planned)).unwrap();
@@ -409,13 +416,64 @@ mod tests {
             assert_eq!(doc.layers[2].blend, BlendMode::SoftLight);
             assert!((doc.layers[2].opacity - 0.85).abs() < 1e-5);
             assert_eq!(doc.layers[3].name, "Skin Tone");
-            assert_eq!(doc.layers[3].blend, BlendMode::Color);
+            assert_eq!(doc.layers[3].blend, BlendMode::LinearLight);
             let healed = doc.layers[1].surface().unwrap().pixel(1, 0);
             assert!((healed[0] - 0.8).abs() < 1.0 / 200.0, "depth {depth}: {healed:?}");
             let original = doc.layers[0].surface().unwrap().pixel(0, 0);
             assert!((original[0] - before[0]).abs() < 1e-5, "the source layer stays put");
             session.execute("edit.undo", json!({})).unwrap();
             assert_eq!(session.active().unwrap().doc.layers.len(), 1, "one undo drops the whole stack");
+        }
+    }
+
+    #[test]
+    fn a_difference_layer_is_mid_gray_and_linear_light_matches_the_filtered_rgb() {
+        for depth in [8u32, 16, 32] {
+            let mut session = rgb(1, 2, depth);
+            session
+                .edit("fill", |doc, active| {
+                    let surface = doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap();
+                    let top = photocraft_raster::from_rgba(&surface.format(), [0.2, 0.4, 0.8, 1.0]);
+                    let bot = photocraft_raster::from_rgba(&surface.format(), [0.0, 1.0, 0.2, 1.0]);
+                    surface.write_pixel(0, 0, &top);
+                    surface.write_pixel(0, 1, &bot);
+                    Ok(())
+                })
+                .unwrap();
+            let mut source = RgbImage::new(1, 2).unwrap();
+            source.set(0, 0, [0.2, 0.4, 0.8]);
+            source.set(0, 1, [0.0, 1.0, 0.2]);
+            let mut filtered = source.clone();
+            filtered.set(0, 0, [0.6, 0.0, 0.8]);
+            let layer = layer_pixels(ResultKind::Difference, &source, filtered.clone()).unwrap();
+            let planned = vec![(super::LayerPlacement { blend: BlendMode::LinearLight, opacity: 1.0, name: "Skin Tone".into() }, layer)];
+            let alpha = vec![1.0; 2];
+            session.edit("Skin Tone", |doc, active| super::install(doc, active, &alpha, &planned)).unwrap();
+            let doc = &session.active().unwrap().doc;
+            assert_eq!(doc.layers.len(), 2, "depth {depth}");
+            assert_eq!(doc.layers[1].blend, BlendMode::LinearLight);
+            assert!((doc.layers[1].opacity - 1.0).abs() < 1e-6);
+            let tol = match depth {
+                8 => 2.0 / 255.0,
+                16 => 2.0 / 65535.0,
+                _ => 1e-5,
+            };
+            let stored = doc.layers[1].surface().unwrap().pixel(0, 0);
+            assert!((stored[0] - 0.7).abs() < tol, "depth {depth}: residual {stored:?}");
+            assert!((stored[1] - 0.3).abs() < tol, "depth {depth}: residual {stored:?}");
+            assert!((stored[2] - 0.5).abs() < tol, "depth {depth}: unchanged channel stays mid-gray {stored:?}");
+            assert!((stored[0] - 0.6).abs() > 0.05, "depth {depth}: the layer is the residual, not the model RGB");
+            let flat = doc.layers[1].surface().unwrap().pixel(0, 1);
+            assert!(flat[..3].iter().all(|s| (*s - 0.5).abs() < tol), "depth {depth}: unchanged pixel is mid-gray {flat:?}");
+            let original = doc.layers[0].surface().unwrap().pixel(0, 0);
+            assert!((original[0] - 0.2).abs() < tol, "the source layer stays put");
+            let rendered = photocraft_compose::render(doc, photocraft_geom::Rect::new(0, 0, 1, 2));
+            let top = rendered.get(0, 0);
+            let bot = rendered.get(0, 1);
+            for c in 0..3 {
+                assert!((top[c] - filtered.get(0, 0)[c]).abs() < tol, "depth {depth} c={c}: composite {top:?}");
+                assert!((bot[c] - source.get(0, 1)[c]).abs() < tol, "depth {depth} c={c}: unchanged composite {bot:?}");
+            }
         }
     }
 }

@@ -5,6 +5,7 @@
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]
 
 use crate::Error;
+use crate::task::ResultKind;
 
 /// Where a tile's kept pixels are copied from and to.
 #[derive(Clone, Copy, Debug)]
@@ -104,6 +105,32 @@ impl RgbImage {
     }
 }
 
+/// Pixels for the new layer.
+///
+/// `Absolute` keeps the model RGB. `Difference` is
+/// `clamp(0.5 + 0.5 * (filtered - source), 0, 1)` per channel. Linear Light of that residual
+/// over `source` is `filtered` when both images are in 0–1.
+pub fn layer_pixels(kind: ResultKind, source: &RgbImage, mut filtered: RgbImage) -> Result<RgbImage, Error> {
+    match kind {
+        ResultKind::Absolute => Ok(filtered),
+        ResultKind::Difference => {
+            if source.width != filtered.width || source.height != filtered.height || source.rgb.len() != filtered.rgb.len() {
+                return Err(Error::Model("filtered image size does not match the source".into()));
+            }
+            for (slot, src) in filtered.rgb.iter_mut().zip(source.rgb.iter()) {
+                *slot = residual(*slot, *src);
+            }
+            Ok(filtered)
+        }
+    }
+}
+
+/// Mid-gray residual. NaN becomes 0.5, which Linear Light leaves unchanged. Infinity clamps to 0 or 1.
+fn residual(filtered: f32, source: f32) -> f32 {
+    let value = 0.5 + 0.5 * (filtered - source);
+    if value.is_nan() { 0.5 } else { value.clamp(0.0, 1.0) }
+}
+
 pub(crate) fn sample_count(width: u32, height: u32) -> Result<usize, Error> {
     const MAX_PIXELS: u64 = 48_000_000;
     let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(Error::TooLarge)?;
@@ -180,32 +207,78 @@ pub(crate) fn to_nchw(image: &RgbImage) -> Vec<f32> {
     out
 }
 
+/// `[1, 3, H, W]`, or one gray plane `[1, 1, H, W]` copied to R=G=B.
+///
+/// `0.5` stays `0.5` on every channel, which is neutral under Soft Light.
 pub(crate) fn from_nchw(width: u32, height: u32, data: &[f32]) -> Result<RgbImage, Error> {
-    let n = sample_count(width, height)?;
-    let pixels = n / 3;
+    let (pixels, n) = plane_len(width, height)?;
+    if data.len() == pixels {
+        return expand_gray(width, height, data);
+    }
     if data.len() != n {
-        return Err(Error::Model(format!("NCHW output has {} samples, expected {n}", data.len())));
+        return Err(Error::Model(format!("NCHW output has {} samples, expected {n} or {pixels}", data.len())));
     }
     let mut rgb = vec![0.0; n];
     for i in 0..pixels {
-        rgb[i * 3] = data[i];
-        rgb[i * 3 + 1] = data[pixels + i];
-        rgb[i * 3 + 2] = data[pixels * 2 + i];
+        let r = *data.get(i).ok_or_else(|| Error::Model("NCHW output is shorter than its shape".into()))?;
+        let g = *data.get(pixels.saturating_add(i)).ok_or_else(|| Error::Model("NCHW output is shorter than its shape".into()))?;
+        let b = *data.get(pixels.saturating_mul(2).saturating_add(i)).ok_or_else(|| Error::Model("NCHW output is shorter than its shape".into()))?;
+        let base = i.saturating_mul(3);
+        let slot = rgb.get_mut(base..base.saturating_add(3)).ok_or_else(|| Error::Model("NCHW output is shorter than its shape".into()))?;
+        slot.copy_from_slice(&[r, g, b]);
     }
-    let mut image = RgbImage::from_rgb(width, height, rgb)?;
-    sanitize(&mut image);
-    Ok(image)
+    finish(width, height, rgb)
 }
 
+/// `[1, H, W, 3]`, or one gray sample per pixel `[1, H, W, 1]` copied to R=G=B.
+///
+/// `0.5` stays `0.5` on every channel, which is neutral under Soft Light.
 pub(crate) fn from_nhwc(width: u32, height: u32, data: &[f32]) -> Result<RgbImage, Error> {
-    let mut image = RgbImage::from_rgb(width, height, data.to_vec())?;
+    let (pixels, n) = plane_len(width, height)?;
+    if data.len() == pixels {
+        return expand_gray(width, height, data);
+    }
+    if data.len() != n {
+        return Err(Error::Model(format!("NHWC output has {} samples, expected {n} or {pixels}", data.len())));
+    }
+    finish(width, height, data.to_vec())
+}
+
+fn plane_len(width: u32, height: u32) -> Result<(usize, usize), Error> {
+    let rgb = sample_count(width, height)?;
+    Ok((rgb / 3, rgb))
+}
+
+/// Copy a gray plane to R=G=B. One channel of NCHW and one channel of NHWC are the same row-major plane.
+fn expand_gray(width: u32, height: u32, data: &[f32]) -> Result<RgbImage, Error> {
+    let (pixels, n) = plane_len(width, height)?;
+    if data.len() != pixels {
+        return Err(Error::Model(format!("gray output has {} samples, expected {pixels}", data.len())));
+    }
+    let mut rgb = vec![0.0; n];
+    for (i, sample) in data.iter().copied().enumerate() {
+        let base = i.saturating_mul(3);
+        let Some(slot) = rgb.get_mut(base..base.saturating_add(3)) else {
+            return Err(Error::Model("gray output is outside the image".into()));
+        };
+        slot.fill(sample);
+    }
+    finish(width, height, rgb)
+}
+
+fn finish(width: u32, height: u32, rgb: Vec<f32>) -> Result<RgbImage, Error> {
+    let mut image = RgbImage::from_rgb(width, height, rgb)?;
     sanitize(&mut image);
     Ok(image)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RgbImage, from_nchw, from_nhwc, resize, to_nchw};
+    use photocraft_color::BlendMode;
+    use photocraft_color::blend::blend_channel;
+
+    use super::{RgbImage, from_nchw, from_nhwc, layer_pixels, resize, to_nchw};
+    use crate::task::ResultKind;
 
     #[test]
     fn a_constant_image_survives_a_resize_round_trip_and_both_layouts() {
@@ -222,5 +295,77 @@ mod tests {
         assert_eq!(nhwc.rgb[0], 0.0);
         let restored = resize(&resize(&RgbImage::from_rgb(2, 2, vec![0.25; 12]).unwrap(), 4, 4).unwrap(), 2, 2).unwrap();
         assert!(restored.rgb.iter().all(|s| (*s - 0.25).abs() < 1e-5), "{:?}", restored.rgb);
+    }
+
+    #[test]
+    fn one_channel_gray_expands_to_rgb_and_keeps_soft_light_neutral() {
+        let nchw = from_nchw(2, 2, &[0.5, 0.2, 0.8, f32::NAN]).unwrap();
+        assert_eq!(nchw.get(0, 0), [0.5, 0.5, 0.5]);
+        assert_eq!(nchw.get(1, 0), [0.2, 0.2, 0.2]);
+        assert_eq!(nchw.get(0, 1), [0.8, 0.8, 0.8]);
+        assert_eq!(nchw.get(1, 1), [0.0, 0.0, 0.0], "non-finite gray becomes 0");
+        let neutral = nchw.get(0, 0)[0];
+        let base = 0.35;
+        let soft = blend_channel(BlendMode::SoftLight, base, neutral);
+        assert!((soft - base).abs() < 1e-5, "0.5 stays Soft Light neutral, got {soft}");
+
+        let nhwc = from_nhwc(2, 1, &[0.5, 0.25]).unwrap();
+        assert_eq!(nhwc.get(0, 0), [0.5, 0.5, 0.5]);
+        assert_eq!(nhwc.get(1, 0), [0.25, 0.25, 0.25]);
+        let rgb = from_nhwc(1, 1, &[0.1, 0.2, 0.3]).unwrap();
+        assert_eq!(rgb.get(0, 0), [0.1, 0.2, 0.3], "three channels stay distinct");
+
+        let err = from_nchw(2, 2, &[0.5; 5]).unwrap_err();
+        assert!(err.to_string().contains("NCHW"), "{err}");
+        let err = from_nhwc(2, 2, &[0.5; 5]).unwrap_err();
+        assert!(err.to_string().contains("NHWC"), "{err}");
+    }
+
+    #[test]
+    fn difference_residual_is_mid_gray_and_linear_light_reconstructs() {
+        let mut source = RgbImage::new(1, 2).unwrap();
+        source.set(0, 0, [0.2, 0.4, 0.8]);
+        source.set(0, 1, [0.0, 1.0, 0.25]);
+        let mut filtered = RgbImage::new(1, 2).unwrap();
+        filtered.set(0, 0, [0.5, 0.4, 1.0]);
+        filtered.set(0, 1, [0.0, 1.0, 0.25]);
+        let layer = layer_pixels(ResultKind::Difference, &source, filtered.clone()).unwrap();
+        let changed = layer.get(0, 0);
+        assert!((changed[0] - 0.65).abs() < 1e-6, "{changed:?}");
+        assert!((changed[1] - 0.5).abs() < 1e-6, "an unchanged channel is mid-gray");
+        assert!((changed[2] - 0.6).abs() < 1e-6, "{changed:?}");
+        let same = layer.get(0, 1);
+        assert!(same.iter().all(|s| (*s - 0.5).abs() < 1e-6), "an unchanged pixel is mid-gray: {same:?}");
+        for y in 0..2 {
+            let src = source.get(0, y);
+            let residual = layer.get(0, y);
+            let want = filtered.get(0, y);
+            for c in 0..3 {
+                let got = blend_channel(BlendMode::LinearLight, src[c], residual[c]);
+                assert!((got - want[c]).abs() < 1e-5, "y={y} c={c}: {got} vs {}", want[c]);
+            }
+        }
+    }
+
+    #[test]
+    fn difference_residual_clamps_and_absolute_keeps_the_model_rgb() {
+        let mut source = RgbImage::new(1, 1).unwrap();
+        source.set(0, 0, [0.0, 1.0, 0.25]);
+        let mut wild = RgbImage::new(1, 1).unwrap();
+        wild.set(0, 0, [2.0, -1.0, f32::NAN]);
+        let clamped = layer_pixels(ResultKind::Difference, &source, wild).unwrap();
+        let px = clamped.get(0, 0);
+        assert!((px[0] - 1.0).abs() < 1e-6, "{px:?}");
+        assert!((px[1] - 0.0).abs() < 1e-6, "{px:?}");
+        assert!((px[2] - 0.5).abs() < 1e-6, "a non-finite residual is mid-gray: {px:?}");
+        let err = layer_pixels(ResultKind::Difference, &RgbImage::new(2, 1).unwrap(), RgbImage::new(1, 1).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("size"), "{err}");
+        let mut filtered = RgbImage::new(1, 1).unwrap();
+        filtered.rgb[0] = 1.25;
+        filtered.rgb[1] = f32::NAN;
+        let absolute = layer_pixels(ResultKind::Absolute, &source, filtered.clone()).unwrap();
+        assert_eq!(absolute.rgb[0], 1.25);
+        assert!(absolute.rgb[1].is_nan());
+        assert_eq!(absolute.rgb[2], filtered.rgb[2]);
     }
 }

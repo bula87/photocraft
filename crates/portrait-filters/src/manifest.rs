@@ -6,7 +6,7 @@ use photocraft_color::BlendMode;
 use serde_json::Value;
 
 use crate::Error;
-use crate::task::{self, LayerPlacement};
+use crate::task::{self, LayerPlacement, ResultKind};
 
 /// How the graph wants its RGB tensor. The model's own shape wins when it is unambiguous.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +47,7 @@ pub struct ParsedManifest {
     pub model_file: String,
     pub solo: LayerPlacement,
     pub stacked: LayerPlacement,
+    pub result: ResultKind,
     pub tensor: TensorContract,
     pub tile: Option<Tile>,
 }
@@ -64,6 +65,7 @@ pub fn parse_manifest(bytes: &[u8], folder_name: &str) -> Result<ParsedManifest,
     };
     let defaults = task::defaults_for(&id);
     let (solo, stacked) = placements(obj, defaults.solo, defaults.stacked)?;
+    let result = result_of(obj, defaults.result)?;
     let label = string_any(obj, &["label", "name"]).unwrap_or(&defaults.label).to_string();
     let mut solo = solo;
     let mut stacked = stacked;
@@ -74,6 +76,12 @@ pub fn parse_manifest(bytes: &[u8], folder_name: &str) -> Result<ParsedManifest,
         solo.name = label.clone();
         stacked.name = label.clone();
     }
+    // Difference reconstructs only under Linear Light at opacity 1. Installed Skin Tone
+    // manifests still say Normal / Color; those blend fields must not win.
+    if result == ResultKind::Difference {
+        force_linear_light(&mut solo);
+        force_linear_light(&mut stacked);
+    }
     Ok(ParsedManifest {
         id,
         label,
@@ -83,6 +91,7 @@ pub fn parse_manifest(bytes: &[u8], folder_name: &str) -> Result<ParsedManifest,
         model_file: string_any(obj, &["model", "modelFile", "model_file"]).unwrap_or("model.onnx").to_string(),
         solo,
         stacked,
+        result,
         tensor: tensor_contract(obj.get("tensor").or_else(|| obj.get("io"))),
         tile: tile_of(obj.get("tile"))?,
     })
@@ -102,9 +111,14 @@ fn check_format(obj: &serde_json::Map<String, Value>) -> Result<(), Error> {
     Ok(())
 }
 
+fn force_linear_light(place: &mut LayerPlacement) {
+    place.blend = BlendMode::LinearLight;
+    place.opacity = 1.0;
+}
+
 fn placements(obj: &serde_json::Map<String, Value>, mut solo: LayerPlacement, mut stacked: LayerPlacement) -> Result<(LayerPlacement, LayerPlacement), Error> {
-    // A blend written on the package applies to both rows. Skin Tone's Color default survives
-    // when the manifest leaves blend unset. `whenStacked` only changes the All row.
+    // A blend written on the package applies to both rows. `whenStacked` only changes the All row.
+    // A difference result replaces both blends with Linear Light at opacity 1 afterwards.
     if has_blend_or_opacity(obj) {
         apply_blend_opacity(obj, &mut solo)?;
         apply_blend_opacity(obj, &mut stacked)?;
@@ -129,6 +143,16 @@ fn placements(obj: &serde_json::Map<String, Value>, mut solo: LayerPlacement, mu
         }
     }
     Ok((solo, stacked))
+}
+
+fn result_of(obj: &serde_json::Map<String, Value>, default: ResultKind) -> Result<ResultKind, Error> {
+    let Some(key) = ["result", "resultMode", "result_mode"].into_iter().find(|key| obj.contains_key(*key)) else {
+        return Ok(default);
+    };
+    let Some(raw) = obj.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        return Err(Error::Package("result must be \"absolute\" or \"difference\"".into()));
+    };
+    ResultKind::parse(raw)
 }
 
 fn has_blend_or_opacity(obj: &serde_json::Map<String, Value>) -> bool {
@@ -169,7 +193,7 @@ fn tile_of(value: Option<&Value>) -> Result<Option<Tile>, Error> {
     let Some(size) = number_any(obj, &["size"]) else {
         return Err(Error::Package("tile.size is required when tile is set".into()));
     };
-    if !size.is_finite() || size < 1.0 || size > 4096.0 || size.fract() != 0.0 {
+    if !size.is_finite() || !(1.0..=4096.0).contains(&size) || size.fract() != 0.0 {
         return Err(Error::Package("tile.size must be a whole number from 1 to 4096".into()));
     }
     let overlap = number_any(obj, &["overlap"]).unwrap_or(0.0);
