@@ -6,7 +6,7 @@ use photocraft_color::BlendMode;
 use serde_json::Value;
 
 use crate::Error;
-use crate::task::{LayerPlacement, Task};
+use crate::task::{self, LayerPlacement};
 
 /// How the graph wants its RGB tensor. The model's own shape wins when it is unambiguous.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,15 +30,25 @@ impl Default for TensorContract {
     }
 }
 
+/// Optional tile. `size` is the owned square; `overlap` is extra context cropped back off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tile {
+    pub size: u32,
+    pub overlap: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct ParsedManifest {
-    pub task: Option<Task>,
-    pub name: Option<String>,
+    pub id: String,
+    pub label: String,
+    pub description: String,
     pub version: String,
+    pub priority: i32,
     pub model_file: String,
-    pub solo: Option<LayerPlacement>,
-    pub stacked: Option<LayerPlacement>,
+    pub solo: LayerPlacement,
+    pub stacked: LayerPlacement,
     pub tensor: TensorContract,
+    pub tile: Option<Tile>,
 }
 
 pub fn parse_manifest(bytes: &[u8], folder_name: &str) -> Result<ParsedManifest, Error> {
@@ -47,6 +57,38 @@ pub fn parse_manifest(bytes: &[u8], folder_name: &str) -> Result<ParsedManifest,
     }
     let value: Value = serde_json::from_slice(bytes).map_err(|e| Error::Package(format!("manifest.json is not JSON ({e})")))?;
     let obj = value.as_object().ok_or_else(|| Error::Package("manifest.json must be an object".into()))?;
+    check_format(obj)?;
+    let id = match string_any(obj, &["task", "id"]) {
+        Some(raw) => task::normalize_id(raw)?,
+        None => task::normalize_id(folder_name)?,
+    };
+    let defaults = task::defaults_for(&id);
+    let (solo, stacked) = placements(obj, defaults.solo, defaults.stacked)?;
+    let label = string_any(obj, &["label", "name"]).unwrap_or(&defaults.label).to_string();
+    let mut solo = solo;
+    let mut stacked = stacked;
+    if let Some(layer) = string_any(obj, &["layerName", "layer_name"]) {
+        solo.name = layer.to_string();
+        stacked.name = layer.to_string();
+    } else if string_any(obj, &["label", "name"]).is_some() {
+        solo.name = label.clone();
+        stacked.name = label.clone();
+    }
+    Ok(ParsedManifest {
+        id,
+        label,
+        description: description_of(obj)?,
+        version: string_any(obj, &["version"]).unwrap_or("").to_string(),
+        priority: priority_of(obj, defaults.priority)?,
+        model_file: string_any(obj, &["model", "modelFile", "model_file"]).unwrap_or("model.onnx").to_string(),
+        solo,
+        stacked,
+        tensor: tensor_contract(obj.get("tensor").or_else(|| obj.get("io"))),
+        tile: tile_of(obj.get("tile"))?,
+    })
+}
+
+fn check_format(obj: &serde_json::Map<String, Value>) -> Result<(), Error> {
     if let Some(format) = string_any(obj, &["format", "schema"])
         && !matches!(format, "photocraft-portrait-filter" | "photocraft-retouch-filter" | "photocraft-retouch")
     {
@@ -57,49 +99,54 @@ pub fn parse_manifest(bytes: &[u8], folder_name: &str) -> Result<ParsedManifest,
     {
         return Err(Error::Package(format!("unsupported formatVersion {version}")));
     }
-    let task = string_any(obj, &["task", "id"]).and_then(Task::parse).or_else(|| Task::parse(folder_name));
-    let (solo, stacked) = match task {
-        Some(task) => placements(obj.get("placement"), task)?,
-        None => (None, None),
-    };
-    let tensor = tensor_contract(obj.get("tensor").or_else(|| obj.get("io")));
-    Ok(ParsedManifest {
-        task,
-        name: string_any(obj, &["name", "layerName", "layer_name"]).map(str::to_string),
-        version: string_any(obj, &["version"]).unwrap_or("").to_string(),
-        model_file: string_any(obj, &["model", "modelFile", "model_file"]).unwrap_or("model.onnx").to_string(),
-        solo,
-        stacked,
-        tensor,
-    })
+    Ok(())
 }
 
-fn placements(value: Option<&Value>, task: Task) -> Result<(Option<LayerPlacement>, Option<LayerPlacement>), Error> {
-    let (mut solo, mut stacked) = task.defaults();
-    let Some(obj) = value.and_then(Value::as_object) else {
-        return Ok((Some(solo), Some(stacked)));
-    };
+fn placements(obj: &serde_json::Map<String, Value>, mut solo: LayerPlacement, mut stacked: LayerPlacement) -> Result<(LayerPlacement, LayerPlacement), Error> {
+    // A blend written on the package applies to both rows. Skin Tone's Color default survives
+    // when the manifest leaves blend unset. `whenStacked` only changes the All row.
+    if has_blend_or_opacity(obj) {
+        apply_blend_opacity(obj, &mut solo)?;
+        apply_blend_opacity(obj, &mut stacked)?;
+    }
+    if let Some(when) = stacked_block(obj) {
+        apply_blend_opacity(when, &mut stacked)?;
+    }
+    if let Some(placement) = obj.get("placement").and_then(Value::as_object) {
+        if has_blend_or_opacity(placement) {
+            apply_blend_opacity(placement, &mut solo)?;
+            if stacked_block(placement).is_none() && stacked_block(obj).is_none() {
+                stacked.blend = solo.blend;
+                stacked.opacity = solo.opacity;
+            }
+        }
+        if let Some(name) = string_any(placement, &["name", "layerName", "layer_name"]) {
+            solo.name = name.to_string();
+            stacked.name = name.to_string();
+        }
+        if let Some(when) = stacked_block(placement) {
+            apply_blend_opacity(when, &mut stacked)?;
+        }
+    }
+    Ok((solo, stacked))
+}
+
+fn has_blend_or_opacity(obj: &serde_json::Map<String, Value>) -> bool {
+    string_any(obj, &["blend", "blendMode", "blend_mode"]).is_some() || number_any(obj, &["opacity"]).is_some()
+}
+
+fn stacked_block(obj: &serde_json::Map<String, Value>) -> Option<&serde_json::Map<String, Value>> {
+    obj.get("whenStacked").or_else(|| obj.get("when_stacked")).and_then(Value::as_object)
+}
+
+fn apply_blend_opacity(obj: &serde_json::Map<String, Value>, place: &mut LayerPlacement) -> Result<(), Error> {
     if let Some(blend) = string_any(obj, &["blend", "blendMode", "blend_mode"]) {
-        solo.blend = parse_blend(blend)?;
+        place.blend = parse_blend(blend)?;
     }
     if let Some(opacity) = number_any(obj, &["opacity"]) {
-        solo.opacity = opacity_of(opacity)?;
+        place.opacity = opacity_of(opacity)?;
     }
-    if let Some(name) = string_any(obj, &["name", "layerName", "layer_name"]) {
-        solo.name = name.to_string();
-        stacked.name = name.to_string();
-    }
-    stacked.blend = solo.blend;
-    stacked.opacity = solo.opacity;
-    if let Some(when) = obj.get("whenStacked").or_else(|| obj.get("when_stacked")).and_then(Value::as_object) {
-        if let Some(blend) = string_any(when, &["blend", "blendMode", "blend_mode"]) {
-            stacked.blend = parse_blend(blend)?;
-        }
-        if let Some(opacity) = number_any(when, &["opacity"]) {
-            stacked.opacity = opacity_of(opacity)?;
-        }
-    }
-    Ok((Some(solo), Some(stacked)))
+    Ok(())
 }
 
 fn tensor_contract(value: Option<&Value>) -> TensorContract {
@@ -115,6 +162,38 @@ fn tensor_contract(value: Option<&Value>) -> TensorContract {
         input: string_any(obj, &["input", "inputName", "input_name"]).map(str::to_string),
         output: string_any(obj, &["output", "outputName", "output_name"]).map(str::to_string),
     }
+}
+
+fn tile_of(value: Option<&Value>) -> Result<Option<Tile>, Error> {
+    let Some(obj) = value.and_then(Value::as_object) else { return Ok(None) };
+    let Some(size) = number_any(obj, &["size"]) else {
+        return Err(Error::Package("tile.size is required when tile is set".into()));
+    };
+    if !size.is_finite() || size < 1.0 || size > 4096.0 || size.fract() != 0.0 {
+        return Err(Error::Package("tile.size must be a whole number from 1 to 4096".into()));
+    }
+    let overlap = number_any(obj, &["overlap"]).unwrap_or(0.0);
+    if !overlap.is_finite() || overlap < 0.0 || overlap.fract() != 0.0 || overlap >= size {
+        return Err(Error::Package("tile.overlap must be a whole number smaller than tile.size".into()));
+    }
+    Ok(Some(Tile { size: size as u32, overlap: overlap as u32 }))
+}
+
+fn priority_of(obj: &serde_json::Map<String, Value>, default: i32) -> Result<i32, Error> {
+    let Some(value) = obj.get("priority").or_else(|| obj.get("order")) else { return Ok(default) };
+    let Some(number) = value.as_f64() else { return Err(Error::Package("priority must be a whole number".into())) };
+    if !number.is_finite() || number.fract() != 0.0 || !(-10_000.0..=10_000.0).contains(&number) {
+        return Err(Error::Package("priority must be a whole number from -10000 to 10000".into()));
+    }
+    Ok(number as i32)
+}
+
+fn description_of(obj: &serde_json::Map<String, Value>) -> Result<String, Error> {
+    let Some(text) = string_any(obj, &["description"]) else { return Ok(String::new()) };
+    if text.len() > 1024 {
+        return Err(Error::Package("description is longer than 1024 bytes".into()));
+    }
+    Ok(text.to_string())
 }
 
 pub fn parse_blend(name: &str) -> Result<BlendMode, Error> {

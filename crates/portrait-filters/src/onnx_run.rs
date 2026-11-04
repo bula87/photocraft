@@ -7,13 +7,20 @@ use ort::value::Tensor;
 
 use crate::Error;
 use crate::image::{self, RgbImage};
-use crate::manifest::Layout;
+use crate::manifest::{Layout, Tile};
 use crate::scan::Package;
 
 pub fn infer(package: &Package, image: &RgbImage) -> Result<RgbImage, Error> {
     let _guard = lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let env = environment()?;
     let mut session = Session::builder(env).map_err(model)?.commit_from_file(&package.model).map_err(model)?;
+    match package.tile {
+        Some(tile) => infer_tiled(&mut session, package, image, tile),
+        None => infer_whole(&mut session, package, image),
+    }
+}
+
+fn infer_whole(session: &mut Session, package: &Package, image: &RgbImage) -> Result<RgbImage, Error> {
     let input_info = session.inputs().first().ok_or_else(|| Error::Model("model has no inputs".into()))?;
     let input_name = package.tensor.input.clone().unwrap_or_else(|| input_info.name().to_string());
     let shape = tensor_shape(input_info.dtype());
@@ -33,6 +40,41 @@ pub fn infer(package: &Package, image: &RgbImage) -> Result<RgbImage, Error> {
     let (out_shape, out_data) = value.try_extract_tensor::<f32>().map_err(model)?;
     let decoded = decode(&fed, layout, out_shape, out_data)?;
     image::resize(&decoded, image.width, image.height)
+}
+
+/// `tile.size` is the owned square. `tile.overlap` is context outside that square, cropped off the result.
+fn infer_tiled(session: &mut Session, package: &Package, image: &RgbImage, tile: Tile) -> Result<RgbImage, Error> {
+    if tile.size == 0 {
+        return Err(Error::Model("tile size is zero".into()));
+    }
+    let mut out = RgbImage::new(image.width, image.height)?;
+    let mut y = 0u32;
+    while y < image.height {
+        let owned_h = (image.height - y).min(tile.size);
+        let mut x = 0u32;
+        while x < image.width {
+            let owned_w = (image.width - x).min(tile.size);
+            let x0 = x.saturating_sub(tile.overlap);
+            let y0 = y.saturating_sub(tile.overlap);
+            let x1 = (x.saturating_add(owned_w).saturating_add(tile.overlap)).min(image.width);
+            let y1 = (y.saturating_add(owned_h).saturating_add(tile.overlap)).min(image.height);
+            let crop = image.crop(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))?;
+            let ran = infer_whole(session, package, &crop)?;
+            out.blit(
+                &ran,
+                image::Blit { x, y, sx: x.saturating_sub(x0), sy: y.saturating_sub(y0), width: owned_w, height: owned_h },
+            )?;
+            if owned_w < tile.size {
+                break;
+            }
+            x = x.saturating_add(tile.size);
+        }
+        if owned_h < tile.size {
+            break;
+        }
+        y = y.saturating_add(tile.size);
+    }
+    Ok(out)
 }
 
 fn lock() -> &'static Mutex<()> {

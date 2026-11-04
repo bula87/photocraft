@@ -14,7 +14,7 @@ Build packages in photocraft-retouch:
 retouch package
 ```
 
-Copy each `dist/<task>` directory into the Portrait Filters folder. `<task>` is `heal`, `dodge_burn` or `skin_tone`. Each directory needs `manifest.json` and `model.onnx`.
+Copy each `dist/<id>` directory into the Portrait Filters folder. `<id>` is whatever the package manifest says (`heal`, `dodge_burn`, `skin_tone`, or any new id). Each directory needs `manifest.json` and a model file (`model.onnx` unless the manifest names another file in that folder). A new id does not need a PhotoCraft rebuild.
 
 | Platform | Default folder |
 |---|---|
@@ -42,18 +42,18 @@ Restart is not required. The menu scans the folder when it opens.
 
 ## Menu
 
-**Filter › Portrait retouch**
+**Filter › Portrait retouch** lists one row per package the scan found, then **All**.
 
-| Item | Command | Needs |
-|---|---|---|
-| Heal | `filter.portraitRetouch.heal` | the `heal` package |
-| Dodge & Burn | `filter.portraitRetouch.dodgeBurn` | the `dodge_burn` package |
-| Skin Tone | `filter.portraitRetouch.skinTone` | the `skin_tone` package |
-| All | `filter.portraitRetouch.all` | all three packages |
+| Row | How it runs |
+|---|---|
+| Each package's `label` (or `name`) | `filter.portraitRetouch.apply` with `{"id":"<package id>"}`. The menu id is `filter.portraitRetouch.pkg.<id>`. |
+| All | `filter.portraitRetouch.all` |
 
-A missing package is disabled, with the folder in the reason. **All** is disabled until every package is present. A build without ONNX Runtime disables an item that does have its package, and says to rebuild with `--features portrait-onnx`.
+There is no Rust enum of filter kinds. Dropping a new folder on disk is enough; the next time the menu opens, the row is there. A package that is not on disk is absent, not a greyed row. A build without ONNX Runtime still lists the row and disables it, and says to rebuild with `--features portrait-onnx`.
 
-`filter.portraitRetouch.packages` lists what the scan found (not a menu item).
+`filter.portraitRetouch.heal`, `filter.portraitRetouch.dodgeBurn` and `filter.portraitRetouch.skinTone` stay as command aliases for the classic ids. They are not separate menu rows.
+
+`filter.portraitRetouch.packages` lists the scan (not a menu item), in apply order.
 
 Untrusted automation (MCP without a filesystem capability) cannot run these commands: they read a user directory. The desktop menu and a trusted local CLI can.
 
@@ -61,31 +61,36 @@ Untrusted automation (MCP without a filesystem capability) cannot run these comm
 
 The command reads the active RGB pixel layer (8, 16 or 32-bit), runs that package's graph, and adds a **new layer**. The original layer is not painted. One undo removes every layer that command added.
 
-| Task | Alone | In the All stack |
+| Package | Alone | When All places more than one layer |
 |---|---|---|
-| Heal | Normal, opacity 1 | Normal, opacity 1 |
-| Dodge & Burn | Soft Light, opacity 0.85 | Soft Light, opacity 0.85 |
-| Skin Tone | Normal, opacity 1 | Color, opacity 1 |
+| `heal` | Normal, opacity 1 | Normal, opacity 1 |
+| `dodge_burn` | Soft Light, opacity 0.85 | Soft Light, opacity 0.85 |
+| `skin_tone` | Normal, opacity 1 | Color, opacity 1 |
+| any other id | Normal, opacity 1 | same as alone, unless the manifest sets `whenStacked` |
 
-All stacks them bottom to top: Heal, Dodge & Burn, Skin Tone. Skin Tone uses Color only in that stack, so it recolours the layers under it and leaves their luminosity alone. A lone Skin Tone layer keeps the model's RGB (Normal).
+**All** runs every discovered package, bottom to top. Order is ascending `priority`, then id. The classic ids default to priority 10 (`heal`), 20 (`dodge_burn`) and 30 (`skin_tone`). Any other id defaults to 100, so it sits above those three unless its manifest sets `priority`. One package on its own uses the "alone" blend, including when it is the only package All runs. Skin Tone uses Color only when All places more than one layer.
 
 Grayscale, CMYK and Lab documents are refused. Images over 48 megapixels are refused. The model sees finite RGB samples in 0–1. Source alpha is copied onto the new layer.
 
 ## manifest.json
 
+`formatVersion` is 1. `retouch package` should write one directory per filter, `dist/<id>/manifest.json` next to the model file. A new id is a new package; this fork does not grow a match arm for it.
+
 ```json
 {
   "format": "photocraft-portrait-filter",
   "formatVersion": 1,
-  "task": "dodge_burn",
-  "name": "Dodge & Burn",
+  "id": "glow",
+  "label": "Glow",
+  "description": "Optional sentence for the package list.",
   "version": "1.0.0",
   "model": "model.onnx",
-  "placement": {
-    "blend": "soft light",
-    "opacity": 0.85,
-    "whenStacked": { "blend": "soft light", "opacity": 0.85 }
-  },
+  "blend": "screen",
+  "opacity": 0.6,
+  "layerName": "Glow",
+  "priority": 40,
+  "whenStacked": { "blend": "screen", "opacity": 0.6 },
+  "tile": { "size": 512, "overlap": 32 },
   "tensor": {
     "layout": "nchw",
     "input": "image",
@@ -94,11 +99,25 @@ Grayscale, CMYK and Lab documents are refused. Images over 48 megapixels are ref
 }
 ```
 
-`format` may also be `photocraft-retouch-filter` or `photocraft-retouch`. `formatVersion` must be 1 when present. `task` may be omitted when the folder name is `heal`, `dodge_burn` or `skin_tone` (`dodge-burn` and `skin-tone` are accepted). `model` defaults to `model.onnx` and must be a file name inside the package, not a path.
+| Field | Required | Meaning |
+|---|---|---|
+| `formatVersion` | when present, must be 1 | Schema version. Absent is version 1. |
+| `id` or `task` | yes, or the folder name | Stable package id, 1–64 characters: letters, digits, `.`, `_`, `-`. `heal`, `dodge_burn` / `dodge-burn`, and `skin_tone` / `skin-tone` fold to those three ids. |
+| `label` or `name` | no | Menu label. Default is Heal, Dodge & Burn, Skin Tone, or the id. |
+| `layerName` | no | New layer's name. Default is the label. |
+| `description` | no | Shown by `filter.portraitRetouch.packages`. |
+| `blend`, `opacity` | no | Layer blend and opacity, 0–1. Defaults are the table above. `placement.blend` / `placement.opacity` still work. |
+| `whenStacked` | no | Blend and opacity when All places more than one layer. |
+| `priority` or `order` | no | Whole number from -10000 to 10000. Lower is underneath. |
+| `model` | no | File name inside the package. Default `model.onnx`. Not a path. |
+| `tile.size`, `tile.overlap` | no | Owned square (1–4096) and extra context cropped off the result. Omit to run the whole photo in one pass. |
+| `tensor` | no | `layout` `nchw` (default) or `nhwc`, plus optional input and output names. |
 
-`placement` is optional. Omitted fields use the table above. `tensor.layout` is `nchw` (`[1, 3, H, W]`, the default) or `nhwc` (`[1, H, W, 3]`). Omitted input and output names use the graph's first input and first output. A fixed height and width on the graph are resized to with a bilinear filter, then the result is resized back to the photo. A dynamic height and width run at the photo's size. Samples are float32 in 0–1.
+`format` may also be `photocraft-retouch-filter` or `photocraft-retouch`. Any other key is ignored.
 
-`retouch package` should write this manifest next to `model.onnx` under `dist/<task>`.
+`tensor.layout` `nchw` is `[1, 3, H, W]`; `nhwc` is `[1, H, W, 3]`. Omitted input and output names use the graph's first input and first output. A fixed height and width on the graph are resized to with a bilinear filter, then the result is resized back. A dynamic height and width run at the photo's size, or at each tile when `tile` is set. Samples are float32 in 0–1.
+
+The same manifest with `"task": "dodge_burn"` and no blend fields still means Soft Light at 0.85. `"task": "heal"` is Normal at 1. `"task": "skin_tone"` is Normal alone and Color when All stacks it with another package.
 
 ## Build
 
@@ -120,7 +139,7 @@ cargo build -p photocraft-cli --features portrait-onnx
 
 The feature downloads ONNX Runtime through the `ort` crate (MIT OR Apache-2.0, ONNX Runtime 1.31). Do not pass `portrait-onnx` to the web package. `cargo check -p photocraft-portrait-filters --target wasm32-unknown-unknown` stays free of that runtime.
 
-Filter menu items are engine commands, so they show up from the same menu builder as every other extra command. No menu-catalog edit is required.
+**All** is the only static row under Filter › Portrait retouch. Package rows are inserted from the scan (`crates/ui-egui/src/menus/portrait_ui.rs`) and call `filter.portraitRetouch.apply`. Adding a package does not add a command.
 
 ## Tests
 

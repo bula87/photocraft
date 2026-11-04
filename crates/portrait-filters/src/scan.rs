@@ -4,19 +4,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::Error;
-use crate::manifest::{self, ParsedManifest, TensorContract};
-use crate::task::{LayerPlacement, STACK_ORDER, Task};
+use crate::manifest::{self, ParsedManifest, TensorContract, Tile};
+use crate::task::LayerPlacement;
 
-/// One installed package. `solo` is Heal / Dodge & Burn / Skin Tone alone; `stacked` is the All stack.
+/// One installed package. `solo` is a single menu run; `stacked` is used when All places more than one layer.
 #[derive(Clone, Debug)]
 pub struct Package {
-    pub task: Task,
+    pub id: String,
+    pub label: String,
+    pub description: String,
     pub version: String,
+    pub priority: i32,
     pub folder: PathBuf,
     pub model: PathBuf,
     pub solo: LayerPlacement,
     pub stacked: LayerPlacement,
     pub tensor: TensorContract,
+    pub tile: Option<Tile>,
 }
 
 /// A child folder that was not a usable package.
@@ -40,12 +44,20 @@ impl Catalog {
         Self { directory, packages: Vec::new(), skipped: Vec::new(), note: Some(note.into()) }
     }
 
-    pub fn get(&self, task: Task) -> Option<&Package> {
-        self.packages.iter().find(|package| package.task == task)
+    pub fn get(&self, id: &str) -> Option<&Package> {
+        let canonical = crate::task::classic_id(id).unwrap_or(id);
+        self.packages.iter().find(|package| package.id == canonical || package.id == id)
+    }
+
+    /// Bottom-to-top order for **All**: ascending `priority`, then id.
+    pub fn in_apply_order(&self) -> Vec<&Package> {
+        let mut packages: Vec<&Package> = self.packages.iter().collect();
+        packages.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
+        packages
     }
 }
 
-/// Read `directory`'s child folders. Order is [`STACK_ORDER`], then any duplicate is skipped.
+/// Read `directory`'s child folders. Duplicate ids keep the first folder in alphabetical order.
 pub fn scan(directory: &Path) -> Catalog {
     let mut catalog = Catalog { directory: directory.to_path_buf(), packages: Vec::new(), skipped: Vec::new(), note: None };
     let entries = match fs::read_dir(directory) {
@@ -76,8 +88,8 @@ pub fn scan(directory: &Path) -> Catalog {
     for name in names {
         match load_folder(&directory.join(&name), &name) {
             Ok(package) => {
-                if catalog.get(package.task).is_some() {
-                    catalog.skipped.push(Skip { folder: name, reason: format!("duplicate task `{}`", package.task.id()) });
+                if catalog.get(&package.id).is_some() {
+                    catalog.skipped.push(Skip { folder: name, reason: format!("duplicate task `{}`", package.id) });
                 } else {
                     catalog.packages.push(package);
                 }
@@ -85,7 +97,7 @@ pub fn scan(directory: &Path) -> Catalog {
             Err(e) => catalog.skipped.push(Skip { folder: name, reason: e.to_string() }),
         }
     }
-    catalog.packages.sort_by_key(|package| STACK_ORDER.iter().position(|task| *task == package.task).unwrap_or(usize::MAX));
+    catalog.packages.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
     catalog
 }
 
@@ -93,8 +105,7 @@ fn load_folder(folder: &Path, name: &str) -> Result<Package, Error> {
     let manifest_path = folder.join("manifest.json");
     let bytes = fs::read(&manifest_path).map_err(|_| Error::Package("missing manifest.json".into()))?;
     let parsed = manifest::parse_manifest(&bytes, name)?;
-    let ParsedManifest { task, name: layer_name, version, model_file, solo, stacked, tensor } = parsed;
-    let task = task.ok_or_else(|| Error::Package(format!("folder `{name}` is not heal, dodge_burn or skin_tone")))?;
+    let ParsedManifest { id, label, description, version, priority, model_file, solo, stacked, tensor, tile } = parsed;
     if !manifest::model_file_ok(&model_file) {
         return Err(Error::Package(format!("model file `{model_file}` must be a file name inside the package")));
     }
@@ -103,14 +114,5 @@ fn load_folder(folder: &Path, name: &str) -> Result<Package, Error> {
     if !meta.is_file() || meta.len() == 0 {
         return Err(Error::Package(format!("{model_file} is empty")));
     }
-    let (default_solo, default_stacked) = task.defaults();
-    let mut solo = solo.unwrap_or(default_solo);
-    let mut stacked = stacked.unwrap_or(default_stacked);
-    if let Some(layer_name) = layer_name {
-        solo.name = layer_name.clone();
-        if stacked.name == task.menu_label() {
-            stacked.name = layer_name;
-        }
-    }
-    Ok(Package { task, version, folder: folder.to_path_buf(), model, solo, stacked, tensor })
+    Ok(Package { id, label, description, version, priority, folder: folder.to_path_buf(), model, solo, stacked, tensor, tile })
 }

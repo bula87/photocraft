@@ -1058,6 +1058,7 @@ fn absolute_paths_are_checked_against_the_authority_s_own_root() {
 #[test]
 fn portrait_retouch_commands_are_not_available_to_untrusted_automation() {
     for id in [
+        "filter.portraitRetouch.apply",
         "filter.portraitRetouch.heal",
         "filter.portraitRetouch.dodgeBurn",
         "filter.portraitRetouch.skinTone",

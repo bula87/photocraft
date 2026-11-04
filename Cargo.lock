@@ -5622,6 +5622,7 @@ dependencies = [
  "photocraft-io",
  "photocraft-paint",
  "photocraft-plugins",
+ "photocraft-portrait-filters",
  "photocraft-psd",
  "photocraft-raster",
  "photocraft-raw",

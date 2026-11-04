@@ -509,6 +509,7 @@ fn command_uses_ambient_path(id: &str, params: &Value) -> bool {
         }
         // Portrait packages are read from a user directory (the preference, or the platform default).
         "plugin.reload"
+        | "filter.portraitRetouch.apply"
         | "filter.portraitRetouch.heal"
         | "filter.portraitRetouch.dodgeBurn"
         | "filter.portraitRetouch.skinTone"

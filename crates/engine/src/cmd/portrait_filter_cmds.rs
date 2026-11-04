@@ -5,9 +5,7 @@
 
 use photocraft_color::ColorMode;
 use photocraft_doc::{Document, Layer, LayerId};
-use photocraft_portrait_filters::{
-    Catalog, LayerPlacement, MenuWhich, RgbImage, STACK_ORDER, Task, disable_reason, infer, placement, resolve_directory, runtime_available, scan,
-};
+use photocraft_portrait_filters::{Catalog, LayerPlacement, MenuWhich, RgbImage, disable_reason, infer, placement, resolve_directory, runtime_available, scan};
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
@@ -16,16 +14,23 @@ use crate::{EngineError, Result, Session};
 
 const MENU: &[&str] = &["Filter", "Portrait retouch"];
 
-/// Tasks the All command places, in stack order. Re-exported for tests in this module.
-fn catalog_tasks(catalog: &Catalog) -> Vec<Task> {
-    STACK_ORDER.into_iter().filter(|task| catalog.get(*task).is_some()).collect()
-}
-
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec(Task::Heal),
-        spec(Task::DodgeBurn),
-        spec(Task::SkinTone),
+        CommandSpec {
+            id: "filter.portraitRetouch.apply",
+            label: "Portrait Retouch",
+            menu: &[],
+            shortcut: None,
+            params: r#"{"id":str}"#,
+            enabled: enabled_apply,
+            run: run_apply,
+            journal: true,
+        },
+        // Aliases for actions recorded against the first three packages. The menu rows themselves
+        // come from the scan (`filter.portraitRetouch.pkg.<id>`), so a new package needs no command.
+        alias("filter.portraitRetouch.heal", "Heal", enabled_heal, run_heal),
+        alias("filter.portraitRetouch.dodgeBurn", "Dodge & Burn", enabled_dodge, run_dodge),
+        alias("filter.portraitRetouch.skinTone", "Skin Tone", enabled_skin, run_skin),
         CommandSpec {
             id: "filter.portraitRetouch.all",
             label: "All",
@@ -49,41 +54,37 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-fn spec(task: Task) -> CommandSpec {
-    CommandSpec {
-        id: task.command_id(),
-        label: task.menu_label(),
-        menu: MENU,
-        shortcut: None,
-        params: "{}",
-        enabled: match task {
-            Task::Heal => enabled_heal,
-            Task::DodgeBurn => enabled_dodge,
-            Task::SkinTone => enabled_skin,
-        },
-        run: match task {
-            Task::Heal => |s, _| run_one(s, Task::Heal),
-            Task::DodgeBurn => |s, _| run_one(s, Task::DodgeBurn),
-            Task::SkinTone => |s, _| run_one(s, Task::SkinTone),
-        },
-        journal: true,
+fn alias(
+    id: &'static str,
+    label: &'static str,
+    enabled: fn(&Session) -> std::result::Result<(), String>,
+    run: fn(&mut Session, &Value) -> Result<Value>,
+) -> CommandSpec {
+    CommandSpec { id, label, menu: &[], shortcut: None, params: "{}", enabled, run, journal: true }
+}
+
+fn enabled_apply(s: &Session) -> std::result::Result<(), String> {
+    require_rgb(s)?;
+    if !runtime_available() {
+        return Err("this build does not include ONNX Runtime; rebuild with --features portrait-onnx".into());
     }
+    Ok(())
 }
 
 fn enabled_heal(s: &Session) -> std::result::Result<(), String> {
-    enabled_task(s, Task::Heal)
+    enabled_package(s, "heal")
 }
 fn enabled_dodge(s: &Session) -> std::result::Result<(), String> {
-    enabled_task(s, Task::DodgeBurn)
+    enabled_package(s, "dodge_burn")
 }
 fn enabled_skin(s: &Session) -> std::result::Result<(), String> {
-    enabled_task(s, Task::SkinTone)
+    enabled_package(s, "skin_tone")
 }
 
-fn enabled_task(s: &Session, task: Task) -> std::result::Result<(), String> {
+fn enabled_package(s: &Session, id: &str) -> std::result::Result<(), String> {
     require_rgb(s)?;
     let catalog = catalog_of(s);
-    match disable_reason(&catalog, runtime_available(), MenuWhich::Task(task)) {
+    match disable_reason(&catalog, runtime_available(), MenuWhich::Package(id)) {
         Some(reason) => Err(reason),
         None => Ok(()),
     }
@@ -121,57 +122,79 @@ fn list_json(catalog: &Catalog) -> Value {
         "directory": catalog.directory.display().to_string(),
         "runtime": runtime_available(),
         "note": catalog.note,
-        "packages": catalog.packages.iter().map(|package| json!({
-            "task": package.task.id(),
+        "packages": catalog.in_apply_order().into_iter().map(|package| json!({
+            "id": package.id,
+            "task": package.id,
+            "label": package.label,
             "name": package.solo.name,
+            "description": package.description,
+            "priority": package.priority,
             "version": package.version,
             "model": package.model.display().to_string(),
             "blend": package.solo.blend.label(),
             "opacity": package.solo.opacity,
             "stackedBlend": package.stacked.blend.label(),
             "stackedOpacity": package.stacked.opacity,
+            "tile": package.tile.map(|tile| json!({"size": tile.size, "overlap": tile.overlap})),
+            "menuId": photocraft_portrait_filters::menu_command_id(&package.id),
         })).collect::<Vec<_>>(),
         "skipped": catalog.skipped.iter().map(|skip| json!({"folder": skip.folder, "reason": skip.reason})).collect::<Vec<_>>(),
     })
 }
 
-fn run_one(s: &mut Session, task: Task) -> Result<Value> {
-    run_tasks(s, &[task], false, task.menu_label())
+fn run_apply(s: &mut Session, params: &Value) -> Result<Value> {
+    let id =
+        params.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).ok_or_else(|| bad("filter.portraitRetouch.apply", "`id` must be a package id"))?;
+    run_ids(s, &[id.to_string()], "Portrait retouch")
+}
+
+fn run_heal(s: &mut Session, _: &Value) -> Result<Value> {
+    run_ids(s, &["heal".to_string()], "Heal")
+}
+fn run_dodge(s: &mut Session, _: &Value) -> Result<Value> {
+    run_ids(s, &["dodge_burn".to_string()], "Dodge & Burn")
+}
+fn run_skin(s: &mut Session, _: &Value) -> Result<Value> {
+    run_ids(s, &["skin_tone".to_string()], "Skin Tone")
 }
 
 fn run_all(s: &mut Session) -> Result<Value> {
-    let tasks: Vec<Task> = {
+    let ids: Vec<String> = {
         let catalog = catalog_of(s);
         if let Some(reason) = disable_reason(&catalog, runtime_available(), MenuWhich::All) {
             return Err(EngineError::Other(reason));
         }
-        catalog_tasks(&catalog)
+        catalog.in_apply_order().into_iter().map(|package| package.id.clone()).collect()
     };
-    run_tasks(s, &tasks, true, "Portrait retouch")
+    run_ids(s, &ids, "Portrait retouch")
 }
 
-fn run_tasks(s: &mut Session, tasks: &[Task], stacked: bool, label: &str) -> Result<Value> {
+fn run_ids(s: &mut Session, ids: &[String], label: &str) -> Result<Value> {
     require_rgb(s).map_err(|msg| EngineError::Other(msg))?;
     let catalog = catalog_of(s);
+    let stacked = ids.len() > 1;
     let (image, alpha) = read_active(s)?;
-    let mut planned = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        let which = MenuWhich::Task(*task);
-        if let Some(reason) = disable_reason(&catalog, runtime_available(), which) {
+    let mut planned = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(reason) = disable_reason(&catalog, runtime_available(), MenuWhich::Package(id)) {
             return Err(EngineError::Other(reason));
         }
-        let package = catalog.get(*task).ok_or_else(|| EngineError::Other(format!("portrait filter package `{}` is not installed", task.id())))?;
+        let package = catalog.get(id).ok_or_else(|| EngineError::Other(format!("portrait filter package `{id}` is not installed")))?;
         let image = infer(package, &image).map_err(|e| EngineError::Other(e.to_string()))?;
         planned.push((placement(&package.solo, &package.stacked, stacked), image));
     }
-    let ids = s.edit(label, |doc, active| install(doc, active, &alpha, &planned))?;
-    if let Some(top) = ids.last().copied() {
+    let layer_ids = s.edit(label, |doc, active| install(doc, active, &alpha, &planned))?;
+    if let Some(top) = layer_ids.last().copied() {
         select_only(s, top);
     }
     Ok(json!({
-        "layers": ids.iter().map(|id| id.0).collect::<Vec<_>>(),
-        "tasks": tasks.iter().map(|task| task.id()).collect::<Vec<_>>(),
+        "layers": layer_ids.iter().map(|id| id.0).collect::<Vec<_>>(),
+        "tasks": ids,
     }))
+}
+
+fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
+    EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }
 }
 
 fn read_active(s: &Session) -> Result<(RgbImage, Vec<f32>)> {
@@ -269,7 +292,7 @@ fn select_only(s: &mut Session, id: LayerId) {
 #[cfg(test)]
 mod tests {
     use photocraft_color::BlendMode;
-    use photocraft_portrait_filters::{MenuWhich, RgbImage, Task, disable_reason, runtime_available, scan};
+    use photocraft_portrait_filters::{MenuWhich, RgbImage, disable_reason, menu_command_id, runtime_available, scan};
     use serde_json::json;
 
     use super::catalog_of;
@@ -283,17 +306,19 @@ mod tests {
 
     #[test]
     fn commands_sit_in_filter_portrait_retouch() {
-        for (id, label) in [
-            ("filter.portraitRetouch.heal", "Heal"),
-            ("filter.portraitRetouch.dodgeBurn", "Dodge & Burn"),
-            ("filter.portraitRetouch.skinTone", "Skin Tone"),
-            ("filter.portraitRetouch.all", "All"),
+        let all = crate::commands::find("filter.portraitRetouch.all").unwrap();
+        assert_eq!(all.menu, ["Filter", "Portrait retouch"]);
+        assert_eq!(all.label, "All");
+        for id in [
+            "filter.portraitRetouch.apply",
+            "filter.portraitRetouch.heal",
+            "filter.portraitRetouch.dodgeBurn",
+            "filter.portraitRetouch.skinTone",
+            "filter.portraitRetouch.packages",
         ] {
             let spec = crate::commands::find(id).unwrap_or_else(|| panic!("missing {id}"));
-            assert_eq!(spec.menu, ["Filter", "Portrait retouch"]);
-            assert_eq!(spec.label, label);
+            assert!(spec.menu.is_empty(), "{id} is not a static menu row");
         }
-        assert!(crate::commands::find("filter.portraitRetouch.packages").unwrap().menu.is_empty());
     }
 
     #[test]
@@ -324,10 +349,20 @@ mod tests {
         let mut session = rgb(2, 2, 8);
         session.execute("prefs.set", json!({"path": "plugIns.portraitFiltersFolder", "value": root.to_str().unwrap()})).unwrap();
         let catalog = catalog_of(&session);
-        assert!(catalog.get(Task::Heal).is_some());
+        assert!(catalog.get("heal").is_some());
         let err = session.execute("filter.portraitRetouch.heal", json!({})).unwrap_err().to_string();
         assert!(err.contains("ONNX Runtime"), "{err}");
-        assert!(disable_reason(&scan(&root), false, MenuWhich::Task(Task::Heal)).unwrap().contains("ONNX Runtime"));
+        assert!(disable_reason(&scan(&root), false, MenuWhich::Package("heal")).unwrap().contains("ONNX Runtime"));
+        let glow = root.join("glow");
+        std::fs::create_dir_all(&glow).unwrap();
+        std::fs::write(glow.join("manifest.json"), r#"{"id":"glow","label":"Glow","blend":"screen","opacity":0.6,"description":"A fourth filter"}"#).unwrap();
+        std::fs::write(glow.join("model.onnx"), b"fixture").unwrap();
+        let listed = session.execute("filter.portraitRetouch.packages", json!({})).unwrap();
+        let ids: Vec<&str> = listed["packages"].as_array().unwrap().iter().filter_map(|p| p["id"].as_str()).collect();
+        assert_eq!(ids, ["heal", "glow"]);
+        assert_eq!(listed["packages"][1]["menuId"], json!(menu_command_id("glow")));
+        let err = session.execute("filter.portraitRetouch.apply", json!({"id": "glow"})).unwrap_err().to_string();
+        assert!(err.contains("ONNX Runtime"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

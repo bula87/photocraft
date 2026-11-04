@@ -20,10 +20,10 @@ mod task;
 mod onnx_run;
 
 pub use image::RgbImage;
-pub use manifest::{Layout, TensorContract};
+pub use manifest::{Layout, TensorContract, Tile};
 pub use paths::{Platform, default_directory, default_directory_for, resolve_directory};
 pub use scan::{Catalog, Package, Skip, scan};
-pub use task::{DODGE_BURN_OPACITY, LayerPlacement, MenuWhich, STACK_ORDER, Task, disable_reason, placement};
+pub use task::{DODGE_BURN_OPACITY, LayerPlacement, MenuEntry, MenuWhich, classic_id, disable_reason, menu_command_id, menu_entries, normalize_id, placement};
 
 /// Whether this build can execute `model.onnx`. False for wasm and for native builds that were
 /// not compiled with `--features onnx` (engine feature `portrait-onnx`).

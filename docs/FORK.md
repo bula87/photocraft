@@ -11,7 +11,8 @@ Only the portrait-filter host:
 | Path | Why |
 |---|---|
 | `crates/portrait-filters/` | Scan, menu state, blend contract, optional ONNX Runtime |
-| `crates/engine/src/cmd/portrait_filter_cmds.rs` | Filter commands and new-layer placement |
+| `crates/engine/src/cmd/portrait_filter_cmds.rs` | Generic apply command, All, and new-layer placement |
+| `crates/ui-egui/src/menus/portrait_ui.rs` | Menu rows from the package scan |
 | `crates/engine/src/cmd.rs` | Register those commands |
 | `crates/engine/Cargo.toml`, `Cargo.toml` | Depend on the crate; `portrait-onnx` feature |
 | `crates/engine/src/prefs.rs` | `plugIns.portraitFiltersFolder` |

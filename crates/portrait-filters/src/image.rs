@@ -6,6 +6,17 @@
 
 use crate::Error;
 
+/// Where a tile's kept pixels are copied from and to.
+#[derive(Clone, Copy, Debug)]
+pub struct Blit {
+    pub x: u32,
+    pub y: u32,
+    pub sx: u32,
+    pub sy: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Row-major RGB, three `f32` samples per pixel, in 0–1.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RgbImage {
@@ -48,6 +59,48 @@ impl RgbImage {
         self.rgb[i] = rgb[0];
         self.rgb[i + 1] = rgb[1];
         self.rgb[i + 2] = rgb[2];
+    }
+
+    /// A rectangle inside this image. `x + width` and `y + height` must stay inside.
+    pub fn crop(&self, x: u32, y: u32, width: u32, height: u32) -> Result<Self, Error> {
+        if width == 0 || height == 0 || x.saturating_add(width) > self.width || y.saturating_add(height) > self.height {
+            return Err(Error::Model("tile crop is outside the image".into()));
+        }
+        let mut out = Self::new(width, height)?;
+        let row = (width as usize).saturating_mul(3);
+        for dy in 0..height {
+            let src = index(self.width, x, y.saturating_add(dy));
+            let dst = index(width, 0, dy);
+            let Some(from) = self.rgb.get(src..src.saturating_add(row)) else { return Err(Error::Model("tile crop is outside the image".into())) };
+            let Some(into) = out.rgb.get_mut(dst..dst.saturating_add(row)) else { return Err(Error::Model("tile crop is outside the image".into())) };
+            into.copy_from_slice(from);
+        }
+        Ok(out)
+    }
+
+    /// Copy `copy.width`×`copy.height` samples from `src` at `(copy.sx, copy.sy)` onto `(copy.x, copy.y)`.
+    pub fn blit(&mut self, src: &Self, copy: Blit) -> Result<(), Error> {
+        if copy.width == 0 || copy.height == 0 {
+            return Ok(());
+        }
+        if copy.x.saturating_add(copy.width) > self.width
+            || copy.y.saturating_add(copy.height) > self.height
+            || copy.sx.saturating_add(copy.width) > src.width
+            || copy.sy.saturating_add(copy.height) > src.height
+        {
+            return Err(Error::Model("tile blit is outside the image".into()));
+        }
+        let row = (copy.width as usize).saturating_mul(3);
+        for dy in 0..copy.height {
+            let from = index(src.width, copy.sx, copy.sy.saturating_add(dy));
+            let into = index(self.width, copy.x, copy.y.saturating_add(dy));
+            let Some(src_row) = src.rgb.get(from..from.saturating_add(row)) else { return Err(Error::Model("tile blit is outside the image".into())) };
+            let Some(dst_row) = self.rgb.get_mut(into..into.saturating_add(row)) else {
+                return Err(Error::Model("tile blit is outside the image".into()));
+            };
+            dst_row.copy_from_slice(src_row);
+        }
+        Ok(())
     }
 }
 
