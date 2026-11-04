@@ -64,7 +64,7 @@ The command reads the active RGB pixel layer (8, 16 or 32-bit), runs that packag
 | Package | Alone | When All places more than one layer | Layer pixels |
 |---|---|---|---|
 | `heal` | Normal, opacity 1 | Normal, opacity 1 | model RGB |
-| `dodge_burn` | Soft Light, opacity 0.85 | Soft Light, opacity 0.85 | model RGB (the graph is already the Soft Light map) |
+| `dodge_burn` | Soft Light, opacity 0.85 | Soft Light, opacity 0.85 | model output (RGB, or one gray channel copied to R=G=B). The graph is already the Soft Light map; 0.5 stays neutral. |
 | `skin_tone` | Linear Light, opacity 1 | Linear Light, opacity 1 | mid-gray difference |
 | any other id | Normal, opacity 1 | same as alone, unless the manifest sets `whenStacked` | model RGB, unless `result` is `difference` |
 
@@ -132,9 +132,9 @@ Grayscale, CMYK and Lab documents are refused. Images over 48 megapixels are ref
 
 `format` may also be `photocraft-retouch-filter` or `photocraft-retouch`. Any other key is ignored.
 
-`tensor.layout` `nchw` is `[1, 3, H, W]`; `nhwc` is `[1, H, W, 3]`. Omitted input and output names use the graph's first input and first output. A fixed height and width on the graph are resized to with a bilinear filter, then the result is resized back. A dynamic height and width run at the photo's size, or at each tile when `tile` is set. Samples are float32 in 0–1.
+`tensor.layout` `nchw` is `[1, 3, H, W]`; `nhwc` is `[1, H, W, 3]`. A one-channel gray map is accepted too: NCHW `[1, 1, H, W]` or NHWC `[1, H, W, 1]`. Each gray sample is copied to R, G, and B, so `0.5` stays `0.5` on every channel (neutral under Soft Light). Omitted input and output names use the graph's first input and first output. A fixed height and width on the graph are resized to with a bilinear filter, then the result is resized back. A dynamic height and width run at the photo's size, or at each tile when `tile` is set. Samples are float32 in 0–1.
 
-The same manifest with `"task": "dodge_burn"` and no blend or result fields still means Soft Light at 0.85 and the model RGB. `"task": "heal"` is Normal at 1 and the model RGB. `"task": "skin_tone"` is a difference layer at Linear Light, opacity 1, alone and when All stacks it.
+The same manifest with `"task": "dodge_burn"` and no blend or result fields still means Soft Light at 0.85 and the model output. A one-channel gray map from that graph is copied to R=G=B. `"task": "heal"` is Normal at 1 and the model RGB. `"task": "skin_tone"` is a difference layer at Linear Light, opacity 1, alone and when All stacks it.
 
 ## Build
 

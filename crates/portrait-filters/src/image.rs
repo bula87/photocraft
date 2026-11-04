@@ -207,25 +207,67 @@ pub(crate) fn to_nchw(image: &RgbImage) -> Vec<f32> {
     out
 }
 
+/// `[1, 3, H, W]`, or one gray plane `[1, 1, H, W]` copied to R=G=B.
+///
+/// `0.5` stays `0.5` on every channel, which is neutral under Soft Light.
 pub(crate) fn from_nchw(width: u32, height: u32, data: &[f32]) -> Result<RgbImage, Error> {
-    let n = sample_count(width, height)?;
-    let pixels = n / 3;
+    let (pixels, n) = plane_len(width, height)?;
+    if data.len() == pixels {
+        return expand_gray(width, height, data);
+    }
     if data.len() != n {
-        return Err(Error::Model(format!("NCHW output has {} samples, expected {n}", data.len())));
+        return Err(Error::Model(format!("NCHW output has {} samples, expected {n} or {pixels}", data.len())));
     }
     let mut rgb = vec![0.0; n];
     for i in 0..pixels {
-        rgb[i * 3] = data[i];
-        rgb[i * 3 + 1] = data[pixels + i];
-        rgb[i * 3 + 2] = data[pixels * 2 + i];
+        let r = *data.get(i).ok_or_else(|| Error::Model("NCHW output is shorter than its shape".into()))?;
+        let g = *data.get(pixels.saturating_add(i)).ok_or_else(|| Error::Model("NCHW output is shorter than its shape".into()))?;
+        let b = *data.get(pixels.saturating_mul(2).saturating_add(i)).ok_or_else(|| Error::Model("NCHW output is shorter than its shape".into()))?;
+        let base = i.saturating_mul(3);
+        let slot = rgb.get_mut(base..base.saturating_add(3)).ok_or_else(|| Error::Model("NCHW output is shorter than its shape".into()))?;
+        slot.copy_from_slice(&[r, g, b]);
     }
-    let mut image = RgbImage::from_rgb(width, height, rgb)?;
-    sanitize(&mut image);
-    Ok(image)
+    finish(width, height, rgb)
 }
 
+/// `[1, H, W, 3]`, or one gray sample per pixel `[1, H, W, 1]` copied to R=G=B.
+///
+/// `0.5` stays `0.5` on every channel, which is neutral under Soft Light.
 pub(crate) fn from_nhwc(width: u32, height: u32, data: &[f32]) -> Result<RgbImage, Error> {
-    let mut image = RgbImage::from_rgb(width, height, data.to_vec())?;
+    let (pixels, n) = plane_len(width, height)?;
+    if data.len() == pixels {
+        return expand_gray(width, height, data);
+    }
+    if data.len() != n {
+        return Err(Error::Model(format!("NHWC output has {} samples, expected {n} or {pixels}", data.len())));
+    }
+    finish(width, height, data.to_vec())
+}
+
+fn plane_len(width: u32, height: u32) -> Result<(usize, usize), Error> {
+    let rgb = sample_count(width, height)?;
+    Ok((rgb / 3, rgb))
+}
+
+/// Copy a gray plane to R=G=B. One channel of NCHW and one channel of NHWC are the same row-major plane.
+fn expand_gray(width: u32, height: u32, data: &[f32]) -> Result<RgbImage, Error> {
+    let (pixels, n) = plane_len(width, height)?;
+    if data.len() != pixels {
+        return Err(Error::Model(format!("gray output has {} samples, expected {pixels}", data.len())));
+    }
+    let mut rgb = vec![0.0; n];
+    for (i, sample) in data.iter().copied().enumerate() {
+        let base = i.saturating_mul(3);
+        let Some(slot) = rgb.get_mut(base..base.saturating_add(3)) else {
+            return Err(Error::Model("gray output is outside the image".into()));
+        };
+        slot.fill(sample);
+    }
+    finish(width, height, rgb)
+}
+
+fn finish(width: u32, height: u32, rgb: Vec<f32>) -> Result<RgbImage, Error> {
+    let mut image = RgbImage::from_rgb(width, height, rgb)?;
     sanitize(&mut image);
     Ok(image)
 }
@@ -253,6 +295,30 @@ mod tests {
         assert_eq!(nhwc.rgb[0], 0.0);
         let restored = resize(&resize(&RgbImage::from_rgb(2, 2, vec![0.25; 12]).unwrap(), 4, 4).unwrap(), 2, 2).unwrap();
         assert!(restored.rgb.iter().all(|s| (*s - 0.25).abs() < 1e-5), "{:?}", restored.rgb);
+    }
+
+    #[test]
+    fn one_channel_gray_expands_to_rgb_and_keeps_soft_light_neutral() {
+        let nchw = from_nchw(2, 2, &[0.5, 0.2, 0.8, f32::NAN]).unwrap();
+        assert_eq!(nchw.get(0, 0), [0.5, 0.5, 0.5]);
+        assert_eq!(nchw.get(1, 0), [0.2, 0.2, 0.2]);
+        assert_eq!(nchw.get(0, 1), [0.8, 0.8, 0.8]);
+        assert_eq!(nchw.get(1, 1), [0.0, 0.0, 0.0], "non-finite gray becomes 0");
+        let neutral = nchw.get(0, 0)[0];
+        let base = 0.35;
+        let soft = blend_channel(BlendMode::SoftLight, base, neutral);
+        assert!((soft - base).abs() < 1e-5, "0.5 stays Soft Light neutral, got {soft}");
+
+        let nhwc = from_nhwc(2, 1, &[0.5, 0.25]).unwrap();
+        assert_eq!(nhwc.get(0, 0), [0.5, 0.5, 0.5]);
+        assert_eq!(nhwc.get(1, 0), [0.25, 0.25, 0.25]);
+        let rgb = from_nhwc(1, 1, &[0.1, 0.2, 0.3]).unwrap();
+        assert_eq!(rgb.get(0, 0), [0.1, 0.2, 0.3], "three channels stay distinct");
+
+        let err = from_nchw(2, 2, &[0.5; 5]).unwrap_err();
+        assert!(err.to_string().contains("NCHW"), "{err}");
+        let err = from_nhwc(2, 2, &[0.5; 5]).unwrap_err();
+        assert!(err.to_string().contains("NHWC"), "{err}");
     }
 
     #[test]
