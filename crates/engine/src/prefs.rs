@@ -893,6 +893,9 @@ pub struct PlugIns {
     pub show_extension_panels: bool,
     pub allow_scripts_to_connect: bool,
     pub generator_enabled: bool,
+    /// Portrait retouch packages (`manifest.json` + `model.onnx`). Empty uses the platform default.
+    /// See `docs/PORTRAIT_FILTERS.md`. This fork does not ship filter weights.
+    pub portrait_filters_folder: String,
 }
 
 impl Default for PlugIns {
@@ -903,6 +906,7 @@ impl Default for PlugIns {
             show_extension_panels: true,
             allow_scripts_to_connect: false,
             generator_enabled: false,
+            portrait_filters_folder: String::new(),
         }
     }
 }

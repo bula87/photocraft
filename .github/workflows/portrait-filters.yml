@@ -1,0 +1,32 @@
+# Fork-only. Proves the portrait-filter host with and without ONNX Runtime.
+# Upstream feature PRs should not add this job; see docs/FORK.md.
+name: Portrait filters
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Non-ML host
+        run: cargo test -p photocraft-portrait-filters --all-targets
+      - name: Clippy, non-ML
+        run: cargo clippy -p photocraft-portrait-filters --all-targets -- -D warnings
+      - name: wasm32 without ONNX Runtime
+        run: cargo check -p photocraft-portrait-filters --target wasm32-unknown-unknown
+      - name: ONNX Runtime host
+        run: |
+          sudo apt-get update && sudo apt-get install -y g++
+          export LIBRARY_PATH="$(dirname "$(gcc -print-file-name=libstdc++.so)")"
+          cargo test -p photocraft-portrait-filters --all-targets --features onnx
+      - name: Clippy, ONNX Runtime
+        run: |
+          export LIBRARY_PATH="$(dirname "$(gcc -print-file-name=libstdc++.so)")"
+          cargo clippy -p photocraft-portrait-filters --all-targets --features onnx -- -D warnings

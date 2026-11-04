@@ -1054,3 +1054,17 @@ fn absolute_paths_are_checked_against_the_authority_s_own_root() {
     let none = AuthorizedWorkspace::default();
     assert!(none.read(&target.to_string_lossy()).is_err());
 }
+
+#[test]
+fn portrait_retouch_commands_are_not_available_to_untrusted_automation() {
+    for id in [
+        "filter.portraitRetouch.heal",
+        "filter.portraitRetouch.dodgeBurn",
+        "filter.portraitRetouch.skinTone",
+        "filter.portraitRetouch.all",
+        "filter.portraitRetouch.packages",
+    ] {
+        let err = authorize_engine_command(id, &serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("ambient filesystem"), "{id}: {err}");
+    }
+}

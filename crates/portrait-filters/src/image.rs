@@ -1,0 +1,173 @@
+//! RGB images handed to a package. Samples are finite and in 0–1 after a model returns.
+//!
+//! Packing and resize are used by the ONNX runner. Without that feature they stay in the crate
+//! so the same code path is what the feature builds.
+#![cfg_attr(not(feature = "onnx"), allow(dead_code))]
+
+use crate::Error;
+
+/// Row-major RGB, three `f32` samples per pixel, in 0–1.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RgbImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<f32>,
+}
+
+impl RgbImage {
+    pub fn new(width: u32, height: u32) -> Result<Self, Error> {
+        let n = sample_count(width, height)?;
+        Ok(Self { width, height, rgb: vec![0.0; n] })
+    }
+
+    pub fn from_rgb(width: u32, height: u32, rgb: Vec<f32>) -> Result<Self, Error> {
+        let n = sample_count(width, height)?;
+        if rgb.len() != n {
+            return Err(Error::Model(format!("RGB buffer has {} samples, expected {n}", rgb.len())));
+        }
+        Ok(Self { width, height, rgb })
+    }
+
+    pub fn pixel_count(&self) -> usize {
+        (self.width as usize).saturating_mul(self.height as usize)
+    }
+
+    pub fn get(&self, x: u32, y: u32) -> [f32; 3] {
+        let i = index(self.width, x, y);
+        if i.saturating_add(2) >= self.rgb.len() {
+            return [0.0; 3];
+        }
+        [self.rgb[i], self.rgb[i + 1], self.rgb[i + 2]]
+    }
+
+    pub fn set(&mut self, x: u32, y: u32, rgb: [f32; 3]) {
+        let i = index(self.width, x, y);
+        if i.saturating_add(2) >= self.rgb.len() {
+            return;
+        }
+        self.rgb[i] = rgb[0];
+        self.rgb[i + 1] = rgb[1];
+        self.rgb[i + 2] = rgb[2];
+    }
+}
+
+pub(crate) fn sample_count(width: u32, height: u32) -> Result<usize, Error> {
+    const MAX_PIXELS: u64 = 48_000_000;
+    let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(Error::TooLarge)?;
+    if pixels == 0 || pixels > MAX_PIXELS {
+        return Err(Error::TooLarge);
+    }
+    let samples = pixels.checked_mul(3).ok_or(Error::TooLarge)?;
+    usize::try_from(samples).map_err(|_| Error::TooLarge)
+}
+
+fn index(width: u32, x: u32, y: u32) -> usize {
+    (y as usize).saturating_mul(width as usize).saturating_mul(3).saturating_add((x as usize).saturating_mul(3))
+}
+
+/// Bilinear resize. A constant image survives a round trip unchanged.
+pub fn resize(src: &RgbImage, width: u32, height: u32) -> Result<RgbImage, Error> {
+    if width == src.width && height == src.height {
+        return Ok(src.clone());
+    }
+    if width == 0 || height == 0 || src.width == 0 || src.height == 0 {
+        return Err(Error::Model("model spatial size is zero".into()));
+    }
+    let mut dst = RgbImage::new(width, height)?;
+    for y in 0..height {
+        let sy = (f64::from(y) + 0.5) * f64::from(src.height) / f64::from(height) - 0.5;
+        for x in 0..width {
+            let sx = (f64::from(x) + 0.5) * f64::from(src.width) / f64::from(width) - 0.5;
+            dst.set(x, y, sample_bilinear(src, sx, sy));
+        }
+    }
+    Ok(dst)
+}
+
+fn sample_bilinear(src: &RgbImage, x: f64, y: f64) -> [f32; 3] {
+    let x = x.clamp(0.0, f64::from(src.width.saturating_sub(1)));
+    let y = y.clamp(0.0, f64::from(src.height.saturating_sub(1)));
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(src.width.saturating_sub(1));
+    let y1 = (y0 + 1).min(src.height.saturating_sub(1));
+    let tx = (x - f64::from(x0)) as f32;
+    let ty = (y - f64::from(y0)) as f32;
+    let a = src.get(x0, y0);
+    let b = src.get(x1, y0);
+    let c = src.get(x0, y1);
+    let d = src.get(x1, y1);
+    let mut out = [0.0; 3];
+    for i in 0..3 {
+        let top = a[i] + (b[i] - a[i]) * tx;
+        let bot = c[i] + (d[i] - c[i]) * tx;
+        out[i] = top + (bot - top) * ty;
+    }
+    out
+}
+
+pub(crate) fn sanitize(image: &mut RgbImage) {
+    for sample in &mut image.rgb {
+        *sample = if sample.is_finite() { sample.clamp(0.0, 1.0) } else { 0.0 };
+    }
+}
+
+/// NCHW packed `[1, 3, H, W]`.
+pub(crate) fn to_nchw(image: &RgbImage) -> Vec<f32> {
+    let n = image.pixel_count();
+    let mut out = vec![0.0; n.saturating_mul(3)];
+    if out.len() != image.rgb.len() {
+        return Vec::new();
+    }
+    for i in 0..n {
+        out[i] = image.rgb[i * 3];
+        out[n + i] = image.rgb[i * 3 + 1];
+        out[n * 2 + i] = image.rgb[i * 3 + 2];
+    }
+    out
+}
+
+pub(crate) fn from_nchw(width: u32, height: u32, data: &[f32]) -> Result<RgbImage, Error> {
+    let n = sample_count(width, height)?;
+    let pixels = n / 3;
+    if data.len() != n {
+        return Err(Error::Model(format!("NCHW output has {} samples, expected {n}", data.len())));
+    }
+    let mut rgb = vec![0.0; n];
+    for i in 0..pixels {
+        rgb[i * 3] = data[i];
+        rgb[i * 3 + 1] = data[pixels + i];
+        rgb[i * 3 + 2] = data[pixels * 2 + i];
+    }
+    let mut image = RgbImage::from_rgb(width, height, rgb)?;
+    sanitize(&mut image);
+    Ok(image)
+}
+
+pub(crate) fn from_nhwc(width: u32, height: u32, data: &[f32]) -> Result<RgbImage, Error> {
+    let mut image = RgbImage::from_rgb(width, height, data.to_vec())?;
+    sanitize(&mut image);
+    Ok(image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RgbImage, from_nchw, from_nhwc, resize, to_nchw};
+
+    #[test]
+    fn a_constant_image_survives_a_resize_round_trip_and_both_layouts() {
+        let mut image = RgbImage::new(2, 2).unwrap();
+        image.rgb.fill(0.25);
+        image.rgb[0] = f32::NAN;
+        let up = resize(&image, 4, 4).unwrap();
+        assert!(up.rgb.iter().any(|s| s.is_nan()));
+        let packed = to_nchw(&image);
+        let back = from_nchw(2, 2, &packed).unwrap();
+        assert!(back.rgb.iter().all(|s| (*s - 0.25).abs() < 1e-6 || *s == 0.0));
+        assert_eq!(back.rgb[0], 0.0, "non-finite samples become 0");
+        let nhwc = from_nhwc(2, 2, &image.rgb).unwrap();
+        assert_eq!(nhwc.rgb[0], 0.0);
+        let restored = resize(&resize(&RgbImage::from_rgb(2, 2, vec![0.25; 12]).unwrap(), 4, 4).unwrap(), 2, 2).unwrap();
+        assert!(restored.rgb.iter().all(|s| (*s - 0.25).abs() < 1e-5), "{:?}", restored.rgb);
+    }
+}

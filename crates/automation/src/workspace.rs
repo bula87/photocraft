@@ -507,7 +507,13 @@ fn command_uses_ambient_path(id: &str, params: &Value) -> bool {
         "edit.keyboardShortcuts" => {
             params.get("path").is_some() || ["importKys", "exportKys", "summarize"].iter().any(|k| params.get(*k).and_then(|v| v.get("path")).is_some())
         }
-        "plugin.reload" => true,
+        // Portrait packages are read from a user directory (the preference, or the platform default).
+        "plugin.reload"
+        | "filter.portraitRetouch.heal"
+        | "filter.portraitRetouch.dodgeBurn"
+        | "filter.portraitRetouch.skinTone"
+        | "filter.portraitRetouch.all"
+        | "filter.portraitRetouch.packages" => true,
         _ => false,
     }
 }

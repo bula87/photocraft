@@ -1,3 +1,18 @@
+<!-- portrait-fork-banner:begin -->
+
+# PhotoCraft Portrait Filters (maintained fork)
+
+This repository is a **maintained fork** of [storytold/photocraft](https://github.com/storytold/photocraft) (MIT OR Apache-2.0). Upstream history is kept. The only PhotoCraft-side change is a generic host for third-party portrait retouch packages (`manifest.json` + `model.onnx`).
+
+Trained filters and the training pipeline are **not** in this fork. They live in [bula87/photocraft-retouch](https://github.com/bula87/photocraft-retouch) (Origin `tom-allen/photocraft-retouch`) and load as packages. `pc-retouch apply` remains the optional path for stock PhotoCraft, which does not have this menu.
+
+- What differs, where to drop `dist/<task>` packages, and how to build: [docs/PORTRAIT_FILTERS.md](docs/PORTRAIT_FILTERS.md)
+- How to sync upstream, and what to send upstream later: [docs/FORK.md](docs/FORK.md)
+
+The upstream README continues below.
+
+<!-- portrait-fork-banner:end -->
+
 <p align="center">
   <a href="https://getartcraft.com/">
     <picture>

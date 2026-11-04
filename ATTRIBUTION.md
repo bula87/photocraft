@@ -147,6 +147,7 @@ Files copied into `corpus/` by hand (tiff, exr, raw) must be MIT, BSD or CC0.
 | Path | Title | Author | Source | License |
 |---|---|---|---|---|
 | `crates/psd/tests/fixtures/atn/*.atn` | Independently encoded ATN version-16 and version-12 parser fixtures | PhotoCraft contributors (version-12 files: @yoriswind) | Original synthetic test data; wire layout documented in `crates/psd/src/atn.rs`; provenance in the adjacent README | MIT OR Apache-2.0 |
+| `crates/portrait-filters/tests/fixtures/*.onnx` | Synthetic ONNX graphs (identity, multiply-by-half, fixed 4×4 identity) for the portrait-filter host | PhotoCraft portrait-filters fork | Original test graphs from `tests/fixtures/generate.py`. Not trained retouch weights. | MIT OR Apache-2.0 |
 
 ## Embedded-vector editor source
 

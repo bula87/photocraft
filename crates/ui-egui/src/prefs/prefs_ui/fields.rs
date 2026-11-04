@@ -70,6 +70,9 @@ pub(super) fn humanize(key: &str) -> String {
     if key == "generatorEnabled" {
         return "Enable Generator".into();
     }
+    if key == "portraitFiltersFolder" {
+        return "Portrait Filters Folder".into();
+    }
     if key == "lowLatencyDrawing" {
         return "Low-Latency Drawing (vsync off, applies at next launch)".into();
     }

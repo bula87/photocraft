@@ -10,6 +10,8 @@ workspace = true
 [features]
 # Real-file corpus tests (opt-in; `cargo xtask test-corpus`). Fail when the corpus is missing.
 corpus = []
+# ONNX Runtime for Filter › Portrait retouch. Off by default, and not for wasm.
+portrait-onnx = ["photocraft-portrait-filters/onnx"]
 
 [dependencies]
 photocraft-geom = { workspace = true }
@@ -31,6 +33,7 @@ photocraft-io = { workspace = true }
 photocraft-psd = { workspace = true }
 photocraft-format = { workspace = true }
 photocraft-plugins = { workspace = true }
+photocraft-portrait-filters = { workspace = true }
 base64 = "0.22"
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 photocraft-codecs = { workspace = true }
