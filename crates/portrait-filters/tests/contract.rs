@@ -162,24 +162,34 @@ fn a_manifest_can_override_blend_and_rejects_a_path_escape() {
 #[test]
 fn result_difference_is_opt_in_and_skin_tone_can_store_model_rgb() {
     let root = scratch("result");
-    package(&root, "glow", r#"{"id":"glow","label":"Glow","result":"difference"}"#);
+    package(
+        &root,
+        "glow",
+        r#"{"id":"glow","label":"Glow","result":"difference","blend":"screen","opacity":0.2,"whenStacked":{"blend":"multiply","opacity":0.3}}"#,
+    );
     package(&root, "matte", r#"{"id":"matte","result":"diff"}"#);
     package(&root, "heal", r#"{"task":"heal","resultMode":"full"}"#);
     package(&root, "skin_tone", r#"{"task":"skin_tone","result":"absolute","blend":"color"}"#);
     package(&root, "dodge_burn", r#"{"task":"dodge-burn","result_mode":"residual"}"#);
     let catalog = scan(&root);
-    assert_eq!(catalog.get("glow").unwrap().result, ResultKind::Difference);
-    assert_eq!(catalog.get("glow").unwrap().solo.blend, BlendMode::Normal, "difference does not change another id's blend");
+    let glow = catalog.get("glow").unwrap();
+    assert_eq!(glow.result, ResultKind::Difference);
+    assert_eq!(glow.solo.blend, BlendMode::LinearLight);
+    assert_eq!(glow.stacked.blend, BlendMode::LinearLight);
+    assert!((glow.solo.opacity - 1.0).abs() < 1e-6);
+    assert!((glow.stacked.opacity - 1.0).abs() < 1e-6);
     assert_eq!(catalog.get("matte").unwrap().result, ResultKind::Difference);
+    assert_eq!(catalog.get("matte").unwrap().solo.blend, BlendMode::LinearLight);
     assert_eq!(catalog.get("heal").unwrap().result, ResultKind::Absolute);
     assert_eq!(catalog.get("heal").unwrap().solo.blend, BlendMode::Normal);
     let skin = catalog.get("skin_tone").unwrap();
     assert_eq!(skin.result, ResultKind::Absolute);
-    assert_eq!(skin.solo.blend, BlendMode::Color, "an explicit blend still wins");
+    assert_eq!(skin.solo.blend, BlendMode::Color, "absolute still honors an explicit blend");
     assert_eq!(skin.stacked.blend, BlendMode::Color);
     let dodge = catalog.get("dodge_burn").unwrap();
     assert_eq!(dodge.result, ResultKind::Difference);
-    assert_eq!(dodge.solo.blend, BlendMode::SoftLight);
+    assert_eq!(dodge.solo.blend, BlendMode::LinearLight);
+    assert_eq!(dodge.stacked.blend, BlendMode::LinearLight);
     for (folder, manifest) in [("nope", r#"{"id":"nope","result":"softlight"}"#), ("typed", r#"{"id":"typed","result":1}"#)] {
         let dir = root.join(folder);
         fs::create_dir_all(&dir).unwrap();
@@ -189,6 +199,21 @@ fn result_difference_is_opt_in_and_skin_tone_can_store_model_rgb() {
     let skipped = scan(&root).skipped;
     assert!(skipped.iter().any(|s| s.folder == "nope" && s.reason.contains("unknown result")), "{skipped:?}");
     assert!(skipped.iter().any(|s| s.folder == "typed" && s.reason.contains("result")), "{skipped:?}");
+}
+
+#[test]
+fn skin_tone_normal_and_color_still_resolve_to_linear_light_difference() {
+    let root = scratch("skin-old");
+    package(&root, "skin_tone", r#"{"task":"skin_tone","blend":"Normal","opacity":0.4,"layerName":"Tone","whenStacked":{"blend":"Color","opacity":0.7}}"#);
+    let catalog = scan(&root);
+    let skin = catalog.get("skin_tone").unwrap();
+    assert_eq!(skin.result, ResultKind::Difference);
+    assert_eq!(skin.solo.blend, BlendMode::LinearLight);
+    assert_eq!(skin.stacked.blend, BlendMode::LinearLight);
+    assert!((skin.solo.opacity - 1.0).abs() < 1e-6);
+    assert!((skin.stacked.opacity - 1.0).abs() < 1e-6);
+    assert_eq!(skin.solo.name, "Tone");
+    assert_eq!(skin.stacked.name, "Tone");
 }
 
 #[test]

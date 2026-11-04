@@ -66,7 +66,7 @@ The command reads the active RGB pixel layer (8, 16 or 32-bit), runs that packag
 | `heal` | Normal, opacity 1 | Normal, opacity 1 | model RGB |
 | `dodge_burn` | Soft Light, opacity 0.85 | Soft Light, opacity 0.85 | model output (RGB, or one gray channel copied to R=G=B). The graph is already the Soft Light map; 0.5 stays neutral. |
 | `skin_tone` | Linear Light, opacity 1 | Linear Light, opacity 1 | mid-gray difference |
-| any other id | Normal, opacity 1 | same as alone, unless the manifest sets `whenStacked` | model RGB, unless `result` is `difference` |
+| any other id | Normal, opacity 1 | same as alone, unless the manifest sets `whenStacked` | model RGB. `result` `difference` uses Linear Light at opacity 1 for both rows and ignores `blend` / `whenStacked` |
 
 **All** runs every discovered package, bottom to top. Order is ascending `priority`, then id. The classic ids default to priority 10 (`heal`), 20 (`dodge_burn`) and 30 (`skin_tone`). Any other id defaults to 100, so it sits above those three unless its manifest sets `priority`. One package on its own uses the "alone" blend, including when it is the only package All runs.
 
@@ -84,7 +84,9 @@ Linear Light at opacity 1 over that source reconstructs the filtered image:
 composite = clamp(source + 2 * layer - 1, 0, 1)
 ```
 
-Samples already in 0–1 reconstruct exactly. The clamp only moves a sample that was outside 0–1, including infinity. A NaN sample is stored as 0.5, which Linear Light leaves unchanged. Skin Tone uses this residual and Linear Light both alone and when All stacks it. Any other package opts in with `"result": "difference"`. `"result": "absolute"`, or leaving the field out, stores the model RGB. An old Skin Tone manifest that omits `result` still gets the difference. `blend` is independent: a manifest that sets `blend` keeps that mode, and Skin Tone with `"result": "absolute"` stores the model RGB under Linear Light unless it also sets `blend`.
+Samples already in 0–1 reconstruct exactly. The clamp only moves a sample that was outside 0–1, including infinity. A NaN sample is stored as 0.5, which Linear Light leaves unchanged. Skin Tone uses this residual and Linear Light both alone and when All stacks it. Any other package opts in with `"result": "difference"`. `"result": "absolute"`, or leaving the field out, stores the model RGB. An old Skin Tone manifest that omits `result` still gets the difference.
+
+A difference result forces Linear Light at opacity 1 for the alone row and the stacked row. `blend`, `opacity`, and `whenStacked` do not change that placement. An installed Skin Tone manifest that still says `"blend": "Normal"` and `whenStacked.blend` `"Color"` still resolves to Linear Light at opacity 1. `"result": "absolute"` keeps those blend fields. Skin Tone with `"result": "absolute"` stores the model RGB under Linear Light unless the manifest sets another blend.
 
 Grayscale, CMYK and Lab documents are refused. Images over 48 megapixels are refused. The model sees finite RGB samples in 0–1. The new layer stores either that RGB or the difference residual, and source alpha is copied onto it.
 
@@ -122,8 +124,8 @@ Grayscale, CMYK and Lab documents are refused. Images over 48 megapixels are ref
 | `label` or `name` | no | Menu label. Default is Heal, Dodge & Burn, Skin Tone, or the id. |
 | `layerName` | no | New layer's name. Default is the label. |
 | `description` | no | Shown by `filter.portraitRetouch.packages`. |
-| `blend`, `opacity` | no | Layer blend and opacity, 0–1. Defaults are the table above. `placement.blend` / `placement.opacity` still work. |
-| `whenStacked` | no | Blend and opacity when All places more than one layer. |
+| `blend`, `opacity` | no | Layer blend and opacity, 0–1, when `result` is `absolute`. Defaults are the table above. `placement.blend` / `placement.opacity` still work. Ignored when `result` is `difference`, which is Linear Light at opacity 1. |
+| `whenStacked` | no | Blend and opacity when All places more than one layer and `result` is `absolute`. Ignored when `result` is `difference`. |
 | `result`, `resultMode`, or `result_mode` | no | `absolute` (alias `full`) stores the model RGB. `difference` (aliases `diff`, `residual`) stores the mid-gray residual from [Difference maps](#difference-maps). Skin Tone defaults to `difference` when the field is absent. Every other id defaults to `absolute`. |
 | `priority` or `order` | no | Whole number from -10000 to 10000. Lower is underneath. |
 | `model` | no | File name inside the package. Default `model.onnx`. Not a path. |
@@ -134,7 +136,7 @@ Grayscale, CMYK and Lab documents are refused. Images over 48 megapixels are ref
 
 `tensor.layout` `nchw` is `[1, 3, H, W]`; `nhwc` is `[1, H, W, 3]`. A one-channel gray map is accepted too: NCHW `[1, 1, H, W]` or NHWC `[1, H, W, 1]`. Each gray sample is copied to R, G, and B, so `0.5` stays `0.5` on every channel (neutral under Soft Light). Omitted input and output names use the graph's first input and first output. A fixed height and width on the graph are resized to with a bilinear filter, then the result is resized back. A dynamic height and width run at the photo's size, or at each tile when `tile` is set. Samples are float32 in 0–1.
 
-The same manifest with `"task": "dodge_burn"` and no blend or result fields still means Soft Light at 0.85 and the model output. A one-channel gray map from that graph is copied to R=G=B. `"task": "heal"` is Normal at 1 and the model RGB. `"task": "skin_tone"` is a difference layer at Linear Light, opacity 1, alone and when All stacks it.
+The same manifest with `"task": "dodge_burn"` and no blend or result fields still means Soft Light at 0.85 and the model output. A one-channel gray map from that graph is copied to R=G=B. `"task": "heal"` is Normal at 1 and the model RGB. `"task": "skin_tone"` is a difference layer at Linear Light, opacity 1, alone and when All stacks it, including when the manifest still says Normal and Color.
 
 ## Build
 

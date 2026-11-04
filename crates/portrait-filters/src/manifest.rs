@@ -76,6 +76,12 @@ pub fn parse_manifest(bytes: &[u8], folder_name: &str) -> Result<ParsedManifest,
         solo.name = label.clone();
         stacked.name = label.clone();
     }
+    // Difference reconstructs only under Linear Light at opacity 1. Installed Skin Tone
+    // manifests still say Normal / Color; those blend fields must not win.
+    if result == ResultKind::Difference {
+        force_linear_light(&mut solo);
+        force_linear_light(&mut stacked);
+    }
     Ok(ParsedManifest {
         id,
         label,
@@ -105,9 +111,14 @@ fn check_format(obj: &serde_json::Map<String, Value>) -> Result<(), Error> {
     Ok(())
 }
 
+fn force_linear_light(place: &mut LayerPlacement) {
+    place.blend = BlendMode::LinearLight;
+    place.opacity = 1.0;
+}
+
 fn placements(obj: &serde_json::Map<String, Value>, mut solo: LayerPlacement, mut stacked: LayerPlacement) -> Result<(LayerPlacement, LayerPlacement), Error> {
-    // A blend written on the package applies to both rows. Skin Tone's Linear Light default
-    // survives when the manifest leaves blend unset. `whenStacked` only changes the All row.
+    // A blend written on the package applies to both rows. `whenStacked` only changes the All row.
+    // A difference result replaces both blends with Linear Light at opacity 1 afterwards.
     if has_blend_or_opacity(obj) {
         apply_blend_opacity(obj, &mut solo)?;
         apply_blend_opacity(obj, &mut stacked)?;
